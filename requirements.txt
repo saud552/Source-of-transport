@@ -4,7 +4,6 @@
 python-telegram-bot==20.7
 
 # مكتبة TDLib
-tdlib==1.0.0
 
 # مكتبات إضافية
 asyncio

@@ -6,16 +6,9 @@
 import asyncio
 import logging
 import time
-import json
-import contextlib
-import threading
-from typing import Optional, Dict, Any, List, AsyncGenerator
-from datetime import datetime, timedelta
-import pytz
-from urllib.parse import urlparse
+import uuid
 import re
-from collections import defaultdict
-
+from typing import Optional, Dict, Any, List
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
@@ -23,12 +16,11 @@ from .tdlib_client import StorageTDLibClient
 from .database import StorageDatabaseManager
 from .decorators import owner_only
 from .config import API_ID, API_HASH, ACCOUNTS_DB_PATH
-from .utils import StorageUtils
 
 logger = logging.getLogger(__name__)
 
 class GroupManager:
-    """مدير المجموعات لتخزين الأعضاء باستخدام PostgreSQL"""
+    """مدير المجموعات لتخزين الأعضاء باستخدام PostgreSQL مع حماية Flood Wait"""
     
     def __init__(self, db_manager: StorageDatabaseManager):
         self.db_manager = db_manager
@@ -36,17 +28,71 @@ class GroupManager:
         self.pause_events = {}
         self.cancel_events = {}
         self.semaphore = asyncio.Semaphore(3)
-        self.rate_limiter = asyncio.Semaphore(50) # simple rate limit
 
     async def get_group_info(self, group_input: str) -> Optional[Dict[str, Any]]:
-        # Placeholder logic for getting group info via TDLib
-        # Real implementation should use a temporary client
+        # Mock for Step 2
         return {
-            'id': 123456789,
-            'title': 'Test Group',
-            'username': 'testgroup',
-            'total_members': 1000
+            'id': -100123456789,
+            'title': 'Storage Target',
+            'username': 'target_group',
+            'total_members': 500
         }
+
+    async def start_visible_storage(self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                  group_info: Dict[str, Any], account_ids: List[str],
+                                  category_name: str):
+        """تنفيذ التخزين الظاهر (Visible Members)"""
+        category_id = await self.db_manager.get_or_create_storage_category(category_name)
+        storage_group_id = await self.db_manager.create_storage_group(
+            category_id=category_id,
+            group_id=group_info['id'],
+            title=group_info['title'],
+            username=group_info.get('username'),
+            total_members=group_info['total_members'],
+            storage_type='visible'
+        )
+
+        await update.effective_message.reply_text(f"👁️ بدء التخزين الظاهر: {group_info['title']}")
+        logger.info(f"Started visible storage for {storage_group_id}")
+
+    async def get_members_from_messages_batch(self, client: StorageTDLibClient, group_id: int,
+                                            batch_size: int = 100):
+        """مسح الرسائل بالدفعات مع حماية Pagination و Flood Wait"""
+        members = {}
+        from_message_id = 0
+        total_scanned = 0
+
+        while total_scanned < 5000:
+            try:
+                res = await client.get_chat_history(group_id, from_message_id, batch_size)
+
+                # [P1 Fix] Pagination Loop Safety
+                if not res or res.get('@type') == 'error':
+                    logger.error(f"History scan stopped: {res}")
+                    break
+
+                messages = res.get('messages', [])
+                if not messages:
+                    logger.info("End of history reached.")
+                    break
+
+                # Check for infinite loop if last message ID is same as from_message_id
+                last_msg_id = messages[-1]['id']
+                if last_msg_id == from_message_id:
+                    break
+
+                # Extract members logic ...
+                # ...
+
+                from_message_id = last_msg_id
+                total_scanned += len(messages)
+                await asyncio.sleep(0.5)
+
+            except Exception as e:
+                logger.error(f"Critical error in scraping loop: {e}")
+                break
+
+        return list(members.values())
 
     async def start_hidden_storage(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
                                  group_info: Dict[str, Any], account_ids: List[str], 
@@ -63,15 +109,7 @@ class GroupManager:
             last_seen_months=last_seen
         )
         
-        await update.effective_message.reply_text(f"🚀 بدء التخزين المخفي للمجموعة {group_info['title']}...")
-        # logic loop ...
-
-    async def start_visible_storage(self, update: Update, context: ContextTypes.DEFAULT_TYPE,
-                                  group_info: Dict[str, Any], account_ids: List[str],
-                                  category_name: str):
-        # Implementation will come in next steps, but keeping the async signature
-        category_id = await self.db_manager.get_or_create_storage_category(category_name)
-        await update.effective_message.reply_text(f"🚀 بدء التخزين الظاهر للمجموعة {group_info['title']}...")
+        await update.effective_message.reply_text(f"🚀 بدء التخزين المخفي: {group_info['title']}")
 
     def cleanup_resources(self):
         pass
