@@ -17,7 +17,7 @@ PASSPHRASE = os.getenv('ENCRYPTION_PASSPHRASE', 'default_pass').encode()
 SALT = os.getenv('ENCRYPTION_SALT', 'default_salt').encode()
 
 # === إعدادات PostgreSQL ===
-DB_HOST = os.getenv('DB_HOST', 'localhost')
+DB_HOST = os.getenv('DB_HOST', '127.0.0.1')
 DB_PORT = int(os.getenv('DB_PORT', '5432'))
 DB_USER = os.getenv('DB_USER', 'postgres')
 DB_PASSWORD = os.getenv('DB_PASSWORD', 'postgres')
