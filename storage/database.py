@@ -138,6 +138,42 @@ class StorageDatabaseManager:
             """, uuid.UUID(category_id))
             return [dict(row) for row in rows]
     
+    async def bulk_store_members(self, storage_group_id: str, members: List[Dict[str, Any]]) -> int:
+        """تخزين مجموعة من الأعضاء دفعة واحدة (Bulk Insert)"""
+        if not members:
+            return 0
+
+        query = """
+            INSERT INTO stored_members
+            (id, storage_group_id, user_id, username, first_name, last_name, phone, last_seen, is_bot, is_premium)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (storage_group_id, user_id) DO NOTHING
+        """
+
+        data = [
+            (
+                uuid.uuid4(),
+                uuid.UUID(storage_group_id),
+                m["id"],
+                m.get("username"),
+                m.get("first_name"),
+                m.get("last_name"),
+                m.get("phone"),
+                m.get("last_seen"),
+                bool(m.get("is_bot", 0)),
+                bool(m.get("is_premium", 0))
+            ) for m in members
+        ]
+
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.executemany(query, data)
+                # executemany in asyncpg returns the command tag, usually like "INSERT 0 100"
+                return len(data)
+        except Exception as e:
+            logger.error(f"خطأ في التخزين الجماعي للأعضاء: {e}")
+            return 0
+
     async def store_member(self, storage_group_id: str, user_info: Dict[str, Any]) -> bool:
         """تخزين عضو في قاعدة البيانات"""
         try:

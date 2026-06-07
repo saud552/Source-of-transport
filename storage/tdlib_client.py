@@ -9,15 +9,12 @@ import time
 import asyncio
 import tempfile
 import shutil
-import zipfile
-import io
-import base64
 import logging
 import threading
 import re
 from typing import Optional, Dict, Any, List
 
-from .config import tdjson, API_ID, API_HASH
+from .config import tdjson
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +29,6 @@ class StorageTDLibClient:
         self.device_info = device_info
 
         self.auth_state = None
-        self.me = None
         self.db_directory = None
 
         # حلقة أحداث آمنة
@@ -44,7 +40,7 @@ class StorageTDLibClient:
 
         # مستمعون للأحداث
         self._auth_state_event = asyncio.Event()
-        self._waiters: Dict[str, List[asyncio.Future]] = {} # type: ignore
+        self._waiters: Dict[str, List[asyncio.Future]] = {}
 
     async def __aenter__(self):
         return self
@@ -61,12 +57,13 @@ class StorageTDLibClient:
                     event = json.loads(result.decode('utf-8'))
                     self.loop.call_soon_threadsafe(self.event_queue.put_nowait, event)
             except Exception as e:
-                logger.error(f"Error in storage receiver thread: {e}")
-                if "closed" in str(e).lower(): break
+                if not self._stop_event.is_set():
+                    logger.error(f"Error in storage receiver thread: {e}")
+                break
 
     async def _dispatcher_loop(self):
         """معالجة الأحداث وتوزيعها"""
-        while True:
+        while not self._stop_event.is_set():
             try:
                 event = await self.event_queue.get()
                 event_type = event.get('@type')
@@ -79,7 +76,7 @@ class StorageTDLibClient:
                     code = event.get('code')
                     message = event.get('message', '')
                     if code == 429:
-                        logger.warning(f"Flood Wait detected: {message}")
+                        logger.warning(f"Flood Wait detected for {self.phone}: {message}")
 
                 # توزيع الأحداث على الـ waiters
                 if event_type in self._waiters:
@@ -95,12 +92,11 @@ class StorageTDLibClient:
                 logger.error(f"Error in storage dispatcher loop: {e}")
 
     async def _wait_for_response(self, event_type: str, timeout: float = 20.0) -> Optional[Dict[str, Any]]:
-        """انتظار رد معين مع معالجة الأخطاء"""
+        """انتظار رد معين مع معالجة الأخطاء وحماية Flood Wait"""
         future = self.loop.create_future()
         if event_type not in self._waiters: self._waiters[event_type] = []
         self._waiters[event_type].append(future)
 
-        # الانتظار أيضاً لحدث الخطأ
         error_future = self.loop.create_future()
         if 'error' not in self._waiters: self._waiters['error'] = []
         self._waiters['error'].append(error_future)
@@ -119,8 +115,10 @@ class StorageTDLibClient:
             elif error_future in done:
                 err = error_future.result()
                 if err.get('code') == 429:
-                    retry_after = int(re.search(r'\d+', err.get('message', '0')).group() or 0)
-                    logger.warning(f"Client {self.phone} is flood waited. Sleeping {retry_after}s")
+                    # استخراج مدة الانتظار
+                    match = re.search(r'\d+', err.get('message', ''))
+                    retry_after = int(match.group()) if match else 30
+                    logger.warning(f"Account {self.phone} flood waited. Cooling down for {retry_after}s")
                     await asyncio.sleep(retry_after)
                 return err
             return None
@@ -128,9 +126,9 @@ class StorageTDLibClient:
             return None
 
     def initialize(self):
-        """تهيئة العميل"""
+        """تهيئة العميل مع مسار تخزين مؤقت"""
         if not self._receiver_thread:
-            self.db_directory = tempfile.mkdtemp()
+            self.db_directory = tempfile.mkdtemp(prefix=f"tdlib_storage_{self.phone}_")
             self._receiver_thread = threading.Thread(target=self._receive_loop, daemon=True)
             self._receiver_thread.start()
 
@@ -141,13 +139,13 @@ class StorageTDLibClient:
             '@type': 'setTdlibParameters',
             'database_directory': self.db_directory,
             'use_message_database': True,
-            'use_secret_chats': True,
+            'use_secret_chats': False,
             'api_id': self.api_id,
             'api_hash': self.api_hash,
             'system_language_code': 'en',
-            'device_model': self.device_info['device_model'],
-            'system_version': self.device_info['system_version'],
-            'application_version': self.device_info['app_version'],
+            'device_model': self.device_info.get('device_model', 'SM-G998B'),
+            'system_version': self.device_info.get('system_version', 'Android 12'),
+            'application_version': self.device_info.get('app_version', '8.5.1'),
             'enable_storage_optimizer': True
         }
         self.send(params)
@@ -156,16 +154,6 @@ class StorageTDLibClient:
     def send(self, query: Dict[str, Any]):
         query_str = json.dumps(query).encode('utf-8')
         tdjson.td_json_client_send(self.client, query_str)
-
-    async def get_chat(self, chat_id: int) -> Optional[Dict[str, Any]]:
-        self.send({'@type': 'getChat', 'chat_id': chat_id})
-        res = await self._wait_for_response('chat')
-        return res if res and res.get('@type') == 'chat' else None
-
-    async def get_chat_full_info(self, chat_id: int) -> Optional[Dict[str, Any]]:
-        self.send({'@type': 'getSupergroupFullInfo', 'supergroup_id': chat_id})
-        res = await self._wait_for_response('supergroupFullInfo')
-        return res if res and res.get('@type') == 'supergroupFullInfo' else None
 
     async def get_chat_history(self, chat_id: int, from_message_id: int, limit: int) -> Optional[Dict[str, Any]]:
         self.send({
@@ -179,16 +167,31 @@ class StorageTDLibClient:
         return res if res and res.get('@type') == 'messages' else None
 
     async def close(self):
+        """إغلاق آمن للعميل وتنظيف الموارد"""
         self._stop_event.set()
-        if self._dispatcher_task: self._dispatcher_task.cancel()
-        try:
-            self.send({'@type': 'close'})
-            # ... wait for closed ...
-        finally:
-            tdjson.td_json_client_destroy(self.client)
-            if self.db_directory and os.path.exists(self.db_directory):
-                shutil.rmtree(self.db_directory, ignore_errors=True)
+        if self._dispatcher_task:
+            self._dispatcher_task.cancel()
 
-    def save_session(self) -> Optional[str]:
-        # simplified for step 2 ...
-        return None
+        try:
+            # محاولة إغلاق TDLib بشكل نظامي
+            self.send({'@type': 'close'})
+            # انتظار قصير للحالة Closed
+            for _ in range(10):
+                if self.auth_state == 'authorizationStateClosed':
+                    break
+                await asyncio.sleep(0.1)
+        except Exception:
+            pass
+        finally:
+            if self.client:
+                tdjson.td_json_client_destroy(self.client)
+                self.client = None
+
+            # تنظيف المجلد المؤقت بشكل نهائي ومضمون
+            if self.db_directory and os.path.exists(self.db_directory):
+                try:
+                    shutil.rmtree(self.db_directory, ignore_errors=True)
+                    logger.info(f"Cleaned up temp directory for {self.phone}")
+                except Exception as e:
+                    logger.error(f"Failed to cleanup {self.db_directory}: {e}")
+

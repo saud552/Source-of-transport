@@ -82,3 +82,7 @@ tdjson.td_json_client_receive.argtypes = [ctypes.c_void_p, ctypes.c_double]
     STORAGE_IN_PROGRESS,
     EXPORT_DATA
 ) = range(15)
+# === إعدادات التخزين (Scraping Limits) ===
+MAX_MESSAGES_SCAN = int(os.getenv('MAX_MESSAGES_SCAN', '10000'))
+BATCH_SIZE = int(os.getenv('BATCH_SIZE', '100'))
+DB_INSERT_BATCH_SIZE = int(os.getenv('DB_INSERT_BATCH_SIZE', '500'))
