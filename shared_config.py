@@ -23,6 +23,10 @@ DB_USER = os.getenv('DB_USER', 'postgres')
 DB_PASSWORD = os.getenv('DB_PASSWORD', 'postgres')
 DB_NAME = os.getenv('DB_NAME', 'telegram_bots')
 
+# === إعدادات التدويل (Internationalization) ===
+DEFAULT_COUNTRY_CODE = os.getenv('DEFAULT_COUNTRY_CODE', '+967')
+PHONE_VALIDATION_PATTERN = r'^\+\d{7,15}$'
+
 # === مسارات قواعد البيانات (للتوافق القديم) ===
 ACCOUNTS_DB_PATH = 'accounts.db'
 STORAGE_DB_PATH = 'storage.db'

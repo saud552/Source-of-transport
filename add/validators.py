@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-وحدات التحقق من صحة البيانات
+وحدات التحقق من صحة البيانات (Decoupled version)
 """
 
 import re
@@ -8,9 +8,18 @@ import random
 from typing import Dict, Any
 
 from .config import DEVICES
+from shared_config import DEFAULT_COUNTRY_CODE, PHONE_VALIDATION_PATTERN
 
 def get_random_device() -> Dict[str, str]:
-    """اختيار جهاز عشوائي من القائمة مع تحديث الإصدارات"""
+    """اختيار جهاز عشوائي من القائمة المحملة ديناميكياً"""
+    if not DEVICES:
+         return {
+            'device_model': 'Generic Android',
+            'system_version': 'Android 14',
+            'app_version': 'Telegram 10.0',
+            'lang_code': 'en',
+            'lang_pack': 'android'
+        }
     device = random.choice(DEVICES)
     return {
         'device_model': device['device_model'],
@@ -21,16 +30,14 @@ def get_random_device() -> Dict[str, str]:
     }
 
 def validate_phone(phone: str) -> bool:
-    """التحقق من صحة رقم الهاتف بدقة أعلى"""
-    # دعم الأرقام بدون رمز الدولي (تخمين الرمز)
+    """التحقق من صحة رقم الهاتف باستخدام الإعدادات المشتركة"""
+    # معالجة الأرقام التي تبدأ بـ 0 باستخدام رمز الدولة الافتراضي من الإعدادات
     if phone.startswith('0'):
-        phone = '+967' + phone[1:]  # مثال لتعديل الأرقام اليمنية
+        phone = DEFAULT_COUNTRY_CODE + phone[1:]
         
-    pattern = r'^\+\d{7,15}$'
-    return re.match(pattern, phone) is not None
+    return re.match(PHONE_VALIDATION_PATTERN, phone) is not None
 
 def validate_code(code: str) -> bool:
-    """التحقق من صحة رمز التحقق مع دعم رموز أطول"""
+    """التحقق من صحة رمز التحقق"""
     code = code.replace(' ', '').replace('-', '').replace(',', '')
-    # دعم رموز من 5 إلى 8 أرقام (بعض الأنظمة تستخدم رموز أطول)
     return re.match(r'^\d{5,8}$', code) is not None
