@@ -1,36 +1,61 @@
 import os, sys, time, threading, logging, asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# Force project root into path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("BotManager")
 
 def run_health_server():
     class H(BaseHTTPRequestHandler):
-        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
-    HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 10000))), H).serve_forever()
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b"OK")
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), H)
+    logger.info(f"Health server live on port {port}")
+    server.serve_forever()
 
-def start_bot(name, func):
-    logger.info(f"Starting {name} bot...")
+def start_bot_thread(name, entry_point):
+    logger.info(f"Initializing {name} bot thread...")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        # Create a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        func()
+        # entry_point should be the 'main' function which calls asyncio.run or similar
+        # Since our main functions now use asyncio.run(run_bot()), they handle their own loop.
+        # So we just call the function.
+        entry_point()
     except Exception as e:
-        logger.error(f"{name} bot failed: {e}", exc_info=True)
+        logger.error(f"Bot {name} encountered a fatal error: {e}", exc_info=True)
 
 if __name__ == "__main__":
     from add.main import main as add_main
     from storage.main import main as storage_main
     from transf.main import main as transfer_main
 
+    # Start health check server
     threading.Thread(target=run_health_server, daemon=True).start()
 
-    bots = [('Add', add_main), ('Storage', storage_main), ('Transfer', transfer_main)]
+    bots = [
+        ('AddBot', add_main),
+        ('StorageBot', storage_main),
+        ('TransferBot', transfer_main)
+    ]
+
+    threads = []
     for name, func in bots:
-        t = threading.Thread(target=start_bot, args=(name, func), daemon=True)
+        t = threading.Thread(target=start_bot_thread, args=(name, func), name=name, daemon=True)
         t.start()
-        time.sleep(5)
+        threads.append(t)
+        time.sleep(5) # Staggered start
+
+    logger.info("All bot threads launched. Entering monitor loop.")
 
     while True:
-        time.sleep(10)
+        for t in threads:
+            if not t.is_alive():
+                logger.error(f"CRITICAL: Thread {t.name} has died!")
+        time.sleep(30)
