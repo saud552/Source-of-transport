@@ -1,0 +1,24 @@
+# متطلبات نظام البوتات الثلاثة
+
+# مكتبة تيليجرام
+python-telegram-bot==20.7
+
+# مكتبة TDLib
+tdlib==1.0.0
+
+# مكتبات إضافية
+asyncio
+sqlite3
+json
+logging
+threading
+time
+uuid
+ctypes
+re
+urllib.parse
+datetime
+typing
+os
+sys
+pathlib
