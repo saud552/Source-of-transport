@@ -1,44 +1,44 @@
 # -*- coding: utf-8 -*-
 """
-الإعدادات المشتركة بين البوتين
+Production Configuration for Render
 """
-
 import os
 
-# === إعدادات API المشتركة ===
+# API Settings
 API_ID = int(os.getenv('TG_API_ID', '26924046'))
 API_HASH = os.getenv('TG_API_HASH', '4c6ef4cee5e129b7a674de156e2bcc15')
 
-# === إعدادات المدراء ===
+# Admin Settings
 ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '985612253').split(',') if x]
 
-# === إعدادات التشفير المشتركة ===
+# Encryption Settings
 PASSPHRASE = os.getenv('ENCRYPTION_PASSPHRASE', 'default_pass').encode()
 SALT = os.getenv('ENCRYPTION_SALT', 'default_salt').encode()
 
-# === إعدادات PostgreSQL ===
-DB_HOST = os.getenv('DB_HOST', '127.0.0.1')
-DB_PORT = int(os.getenv('DB_PORT', '5432'))
-DB_USER = os.getenv('DB_USER', 'postgres')
-DB_PASSWORD = os.getenv('DB_PASSWORD', 'postgres')
-DB_NAME = os.getenv('DB_NAME', 'telegram_bots')
+# PostgreSQL Settings (Parsed from DATABASE_URL if available)
+DATABASE_URL = os.getenv('DATABASE_URL')
+if DATABASE_URL:
+    # Parsing DATABASE_URL: postgres://user:password@host:port/dbname
+    from urllib.parse import urlparse
+    url = urlparse(DATABASE_URL)
+    DB_HOST = url.hostname
+    DB_PORT = url.port or 5432
+    DB_USER = url.username
+    DB_PASSWORD = url.password
+    DB_NAME = url.path[1:]
+else:
+    DB_HOST = os.getenv('DB_HOST', '127.0.0.1')
+    DB_PORT = int(os.getenv('DB_PORT', '5432'))
+    DB_USER = os.getenv('DB_USER', 'postgres')
+    DB_PASSWORD = os.getenv('DB_PASSWORD', 'postgres')
+    DB_NAME = os.getenv('DB_NAME', 'telegram_bots')
 
-# === إعدادات التدويل (Internationalization) ===
-DEFAULT_COUNTRY_CODE = os.getenv('DEFAULT_COUNTRY_CODE', '+967')
-PHONE_VALIDATION_PATTERN = r'^\+\d{7,15}$'
-
-# === مسارات قواعد البيانات (للتوافق القديم) ===
-ACCOUNTS_DB_PATH = 'accounts.db'
-STORAGE_DB_PATH = 'storage.db'
-
-# === إعدادات TDLib ===
-TDLIB_PATH = os.path.join(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'), 'lib', 'libtdjson.so')
-
-# === إعدادات البوتات الثلاثة ===
+# Bot Tokens
 ADD_BOT_TOKEN = os.getenv('ADD_BOT_TOKEN', '8600331776:AAEUmbwd01q15l0bgYtQEOm_zDT7QgoiVXo')
 STORAGE_BOT_TOKEN = os.getenv('STORAGE_BOT_TOKEN', '8604949254:AAEwfA5hGRKUHkvBpY8e68rJVfZljZcRwME')
 TRANSFER_BOT_TOKEN = os.getenv('TRANSFER_BOT_TOKEN', '8664202831:AAFLn8vijJqr4HbQrTY7WmHDsFcAKjdb2C8')
 
-# === إعدادات أخرى ===
-SESSION_TIMEOUT = 60  # ثانية
-PAGE_SIZE = 5  # عدد العناصر في الصفحة الواحدة
+# Global Constants
+DEFAULT_COUNTRY_CODE = os.getenv('DEFAULT_COUNTRY_CODE', '+967')
+PHONE_VALIDATION_PATTERN = r'^\+\d{7,15}$'
+TDLIB_PATH = os.getenv('TDLIB_PATH', os.path.join(os.getcwd(), 'libtdjson.so'))

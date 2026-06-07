@@ -27,7 +27,7 @@ DB_PATH = STORAGE_DB_PATH
 KEY = None  # سيتم توليده عند أول استخدام
 
 # === تحميل مكتبة TDLib من مسار Termux الثابت ===
-TDLIB_PATH = os.path.join(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'), 'lib', 'libtdjson.so')
+from shared_config import TDLIB_PATH
 
 if not os.path.exists(TDLIB_PATH):
     print(f"المكتبة غير موجودة في المسار المتوقع: {TDLIB_PATH}")

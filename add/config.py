@@ -43,7 +43,7 @@ except Exception as e:
     DEVICES = [{'device_model': 'Generic Android', 'system_version': 'Android 14', 'app_version': 'Telegram 10.0', 'lang_code': 'en', 'lang_pack': 'android'}]
 
 # === تحميل مكتبة TDLib ===
-TDLIB_PATH = os.path.join(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'), 'lib', 'libtdjson.so')
+from shared_config import TDLIB_PATH
 if not os.path.exists(TDLIB_PATH):
     logger.error(f"المكتبة غير موجودة في المسار المتوقع: {TDLIB_PATH}")
     if 'test' not in sys.argv[0]:

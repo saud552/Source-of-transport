@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-تشغيل محسن للبوتات الثلاثة
+Integrated Bot Manager for Render Production
+Includes a health check server and bot orchestration.
 """
 
 import os
@@ -9,151 +10,88 @@ import sys
 import time
 import threading
 import logging
-from datetime import datetime
+import asyncio
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# إضافة مسار المشروع
+# Ensure project root is in path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# إعداد التسجيل
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("BotManager")
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logger.info(f"Health check server listening on port {port}")
+    server.serve_forever()
 
 class BotManager:
-    """مدير البوتات"""
-    
     def __init__(self):
-        self.bots = {}
-        self.running = False
         self.threads = {}
-        
-    def start_bot(self, bot_name, bot_module):
-        """تشغيل بوت معين"""
+        self.running = True
+
+    def start_bot(self, name, module):
         try:
-            logger.info(f"🚀 بدء تشغيل {bot_name}...")
-            bot_module.main()
+            logger.info(f"Starting {name} bot...")
+            module.main()
         except Exception as e:
-            logger.error(f"❌ خطأ في تشغيل {bot_name}: {str(e)}")
-    
-    def start_all_bots(self):
-        """تشغيل جميع البوتات"""
-        logger.info("🚀 بدء تشغيل نظام البوتات الثلاثة...")
-        logger.info("=" * 60)
-        
-        # استيراد البوتات
+            logger.error(f"Error in {name} bot: {e}")
+
+    def run(self):
+        # Import modules dynamically
         try:
             from add import main as add_main
             from storage import main as storage_main
             from transf.main import main as transfer_main
             
-            self.bots = {
-                'add': add_main,
-                'storage': storage_main,
-                'transfer': transfer_main
+            bot_map = {
+                'Add': add_main,
+                'Storage': storage_main,
+                'Transfer': transfer_main
             }
-            
         except Exception as e:
-            logger.error(f"❌ خطأ في استيراد البوتات: {str(e)}")
-            return False
-        
-        # تشغيل البوتات في خيوط منفصلة
-        for bot_name, bot_main in self.bots.items():
-            try:
-                thread = threading.Thread(
-                    target=self.start_bot,
-                    args=(bot_name, bot_main),
-                    name=f"{bot_name}_bot"
-                )
-                thread.daemon = True
-                thread.start()
-                self.threads[bot_name] = thread
-                
-                # تأخير قصير بين البوتات
-                time.sleep(3)
-                
-            except Exception as e:
-                logger.error(f"❌ خطأ في تشغيل {bot_name}: {str(e)}")
-        
-        self.running = True
-        logger.info("✅ تم تشغيل جميع البوتات بنجاح!")
-        logger.info("📱 بوت إضافة الحسابات: جاهز")
-        logger.info("💾 بوت التخزين: جاهز")
-        logger.info("📤 بوت النقل: جاهز")
-        logger.info("=" * 60)
-        
-        return True
-    
-    def stop_all_bots(self):
-        """إيقاف جميع البوتات"""
-        logger.info("⏹️ إيقاف جميع البوتات...")
-        self.running = False
-        
-        # انتظار انتهاء الخيوط
-        for bot_name, thread in self.threads.items():
-            try:
-                thread.join(timeout=5)
-                logger.info(f"✅ تم إيقاف {bot_name}")
-            except Exception as e:
-                logger.error(f"❌ خطأ في إيقاف {bot_name}: {str(e)}")
-    
-    def check_bots_status(self):
-        """فحص حالة البوتات"""
-        active_bots = []
-        for bot_name, thread in self.threads.items():
-            if thread.is_alive():
-                active_bots.append(bot_name)
-        
-        if active_bots:
-            logger.info(f"🟢 البوتات النشطة: {', '.join(active_bots)}")
-        else:
-            logger.warning("🔴 لا توجد بوتات نشطة")
-        
-        return active_bots
+            logger.error(f"Failed to import bot modules: {e}")
+            return
 
-def main():
-    """الدالة الرئيسية"""
-    print("🤖 نظام البوتات الثلاثة المتكاملة")
-    print("=" * 60)
-    print("📱 بوت إضافة الحسابات")
-    print("💾 بوت التخزين")
-    print("📤 بوت النقل")
-    print("=" * 60)
-    
-    # إنشاء مدير البوتات
-    bot_manager = BotManager()
-    
-    try:
-        # تشغيل البوتات
-        if not bot_manager.start_all_bots():
-            logger.error("❌ فشل في تشغيل البوتات")
-            return False
-        
-        # مراقبة البوتات
-        while bot_manager.running:
-            try:
-                time.sleep(30)  # فحص كل 30 ثانية
-                bot_manager.check_bots_status()
-                
-            except KeyboardInterrupt:
-                logger.info("⏹️ تم إيقاف النظام بواسطة المستخدم")
-                break
-            except Exception as e:
-                logger.error(f"❌ خطأ في مراقبة البوتات: {str(e)}")
-                break
-        
-    except Exception as e:
-        logger.error(f"❌ خطأ حرج: {str(e)}")
-        return False
-    
-    finally:
-        # تنظيف
-        bot_manager.stop_all_bots()
-        logger.info("🔚 انتهاء تشغيل النظام")
-    
-    return True
+        # Start health server in a separate thread
+        health_thread = threading.Thread(target=run_health_server, daemon=True)
+        health_thread.start()
+
+        # Start bots
+        for name, module in bot_map.items():
+            t = threading.Thread(target=self.start_bot, args=(name, module), name=f"{name}Thread")
+            t.daemon = True
+            t.start()
+            self.threads[name] = t
+            time.sleep(2)
+
+        logger.info("Integrated system is now live and monitoring.")
+
+        try:
+            while self.running:
+                for name, t in list(self.threads.items()):
+                    if not t.is_alive():
+                        logger.warning(f"Bot {name} thread died! Attempting restart...")
+                        new_t = threading.Thread(target=self.start_bot, args=(name, bot_map[name]), name=f"{name}Thread")
+                        new_t.daemon = True
+                        new_t.start()
+                        self.threads[name] = new_t
+                time.sleep(60)
+        except KeyboardInterrupt:
+            logger.info("System shutting down...")
+            self.running = False
 
 if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)
+    manager = BotManager()
+    manager.run()
