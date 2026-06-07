@@ -91,7 +91,7 @@ class TransferHandlers:
         await query.answer()
         
         # الحصول على المجموعات المتاحة
-        groups = self.db_manager.get_available_source_groups()
+        groups = await self.db_manager.get_available_source_groups()
         
         if not groups:
             await query.edit_message_text(
@@ -124,7 +124,7 @@ class TransferHandlers:
         context.user_data['source_group_id'] = group_id
         
         # الحصول على معلومات المجموعة
-        groups = self.db_manager.get_available_source_groups()
+        groups = await self.db_manager.get_available_source_groups()
         selected_group = next((g for g in groups if g['group_id'] == group_id), None)
         
         if not selected_group:
@@ -135,7 +135,7 @@ class TransferHandlers:
         context.user_data['source_group_info'] = selected_group
         
         # الحصول على فئات الحسابات
-        categories = self.db_manager.get_account_categories()
+        categories = await self.db_manager.get_account_categories()
         
         if not categories:
             await query.edit_message_text(
@@ -170,7 +170,7 @@ class TransferHandlers:
         context.user_data['account_category_id'] = category_id
         
         # الحصول على حسابات الفئة
-        accounts = self.db_manager.get_accounts_by_category(category_id)
+        accounts = await self.db_manager.get_accounts_by_category(category_id)
         
         if not accounts:
             await query.edit_message_text(
@@ -280,7 +280,7 @@ class TransferHandlers:
         account_category_id = context.user_data.get('account_category_id')
         
         # إنشاء عملية النقل
-        transfer_id = self.db_manager.create_transfer_operation(
+        transfer_id = await self.db_manager.create_transfer_operation(
             source_group_id=source_group_info['group_id'],
             source_group_title=source_group_info['title'],
             target_group_id=target_group_id,
@@ -289,7 +289,7 @@ class TransferHandlers:
         )
         
         # الحصول على الأعضاء المخزنين
-        stored_members = self.db_manager.get_stored_members_for_group(source_group_info['group_id'])
+        stored_members = await self.db_manager.get_stored_members_for_group(source_group_info['group_id'])
         
         if not stored_members:
             await query.edit_message_text(
@@ -298,10 +298,10 @@ class TransferHandlers:
             return MAIN_MENU
         
         # إضافة تفاصيل النقل
-        self.db_manager.add_transfer_details(transfer_id, stored_members)
+        await self.db_manager.add_transfer_details(transfer_id, stored_members)
         
         # تحديث إحصائيات العملية
-        self.db_manager.update_transfer_operation(
+        await self.db_manager.update_transfer_operation(
             transfer_id,
             total_members=len(stored_members),
             status='running',
@@ -333,7 +333,7 @@ class TransferHandlers:
         query = update.callback_query
         await query.answer()
         
-        operations = self.db_manager.get_transfer_operations(limit=10)
+        operations = await self.db_manager.get_transfer_operations(limit=10)
         
         if not operations:
             await query.edit_message_text(
@@ -370,7 +370,7 @@ class TransferHandlers:
         query = update.callback_query
         await query.answer()
         
-        groups = self.db_manager.get_available_source_groups()
+        groups = await self.db_manager.get_available_source_groups()
         
         if not groups:
             await query.edit_message_text(

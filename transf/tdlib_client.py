@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-عميل TDLib للنقل
+عميل TDLib للنقل (Thread-safe & Queue-based version)
 """
 
 import asyncio
 import json
 import logging
-import ctypes
-from typing import Dict, Any, Optional
-
-import sys
+import threading
+import re
+import tempfile
+import shutil
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from typing import Dict, Any, Optional, List
 
 from shared_config import API_ID, API_HASH
 from transf.config import tdjson
@@ -19,231 +19,134 @@ from transf.config import tdjson
 logger = logging.getLogger(__name__)
 
 class TDLibClient:
-    """عميل TDLib للنقل"""
+    """عميل TDLib للنقل مع حلقة أحداث آمنة"""
     
-    def __init__(self, session_string: str, device_info: str):
+    def __init__(self, session_string: str, device_info: Dict[str, Any]):
         self.session_string = session_string
-        self.device_info = json.loads(device_info) if isinstance(device_info, str) else device_info
-        self.client = None
+        self.device_info = device_info
+        self.client = tdjson.td_json_client_create()
         self.is_initialized = False
-        self._update_handlers = {}
-    
-    async def initialize(self) -> bool:
-        """تهيئة العميل"""
-        try:
-            # إنشاء العميل
-            self.client = tdjson.td_json_client_create()
-            if not self.client:
-                logger.error("فشل في إنشاء عميل TDLib")
-                return False
-            
-            # إعداد معالج التحديثات
-            asyncio.create_task(self._update_loop())
-            
-            # إرسال طلب التهيئة
-            init_request = {
-                "@type": "setTdlibParameters",
-                "parameters": {
-                    "@type": "tdlibParameters",
-                    "use_test_dc": False,
-                    "database_directory": "/tmp/tdlib",
-                    "files_directory": "/tmp/tdlib",
-                    "use_file_database": True,
-                    "use_chat_info_database": True,
-                    "use_message_database": True,
-                    "use_secret_chats": True,
-                    "api_id": API_ID,
-                    "api_hash": API_HASH,
-                    "system_language_code": "en",
-                    "device_model": self.device_info.get('device_model', 'Unknown'),
-                    "system_version": self.device_info.get('system_version', 'Unknown'),
-                    "application_version": self.device_info.get('app_version', '1.0.0'),
-                    "enable_storage_optimizer": True,
-                    "ignore_file_names": False
-                }
-            }
-            
-            await self._send_request(init_request)
-            
-            # انتظار التهيئة
-            await self._wait_for_authorization()
-            
-            # تسجيل الدخول بالجلسة
-            if not await self._set_authentication_string():
-                return False
-            
-            self.is_initialized = True
-            logger.info("تم تهيئة عميل TDLib بنجاح")
-            return True
-            
-        except Exception as e:
-            logger.error(f"خطأ في تهيئة عميل TDLib: {str(e)}")
-            return False
-    
-    async def _update_loop(self):
-        """حلقة معالجة التحديثات"""
-        while self.client and self.is_initialized:
+        self.auth_state = None
+        self.db_directory = None
+
+        self.event_queue = asyncio.Queue()
+        self.loop = asyncio.get_running_loop()
+        self._stop_event = threading.Event()
+        self._receiver_thread = None
+        self._dispatcher_task = None
+
+        self._auth_state_event = asyncio.Event()
+        self._waiters: Dict[str, List[asyncio.Future]] = {}
+
+    def _receive_loop(self):
+        """الخيط المخصص لاستقبال أحداث TDLib"""
+        while not self._stop_event.is_set():
             try:
-                # استقبال التحديثات
-                update = tdjson.td_json_client_receive(self.client, 1.0)
-                if update:
-                    update_str = update.decode('utf-8')
-                    update_data = json.loads(update_str)
-                    await self._handle_update(update_data)
-                
-                await asyncio.sleep(0.1)
+                result = tdjson.td_json_client_receive(self.client, 1.0)
+                if result:
+                    event = json.loads(result.decode('utf-8'))
+                    self.loop.call_soon_threadsafe(self.event_queue.put_nowait, event)
             except Exception as e:
-                logger.error(f"خطأ في حلقة التحديثات: {str(e)}")
+                if not self._stop_event.is_set():
+                    logger.error(f"Error in transfer receiver thread: {e}")
                 break
-    
-    async def _handle_update(self, update: Dict[str, Any]):
-        """معالجة التحديثات"""
-        update_type = update.get("@type")
-        
-        if update_type == "updateAuthorizationState":
-            await self._handle_authorization_state(update)
-        elif update_type == "updateConnectionState":
-            await self._handle_connection_state(update)
-        elif update_type == "error":
-            logger.error(f"خطأ من TDLib: {update.get('message', 'Unknown error')}")
-    
-    async def _handle_authorization_state(self, update: Dict[str, Any]):
-        """معالجة حالة التفويض"""
-        state = update.get("authorization_state", {})
-        state_type = state.get("@type")
-        
-        if state_type == "authorizationStateReady":
-            logger.info("تم تسجيل الدخول بنجاح")
-        elif state_type == "authorizationStateLoggingOut":
-            logger.info("جاري تسجيل الخروج")
-        elif state_type == "authorizationStateClosed":
-            logger.info("تم إغلاق الجلسة")
-    
-    async def _handle_connection_state(self, update: Dict[str, Any]):
-        """معالجة حالة الاتصال"""
-        state = update.get("state", {})
-        state_type = state.get("@type")
-        
-        if state_type == "connectionStateReady":
-            logger.info("الاتصال جاهز")
-        elif state_type == "connectionStateConnecting":
-            logger.info("جاري الاتصال")
-        elif state_type == "connectionStateConnectingToProxy":
-            logger.info("جاري الاتصال عبر البروكسي")
-    
-    async def _wait_for_authorization(self, timeout: int = 30) -> bool:
-        """انتظار التفويض"""
-        start_time = asyncio.get_event_loop().time()
-        
-        while (asyncio.get_event_loop().time() - start_time) < timeout:
-            await asyncio.sleep(0.5)
-            # يمكن إضافة منطق للتحقق من حالة التفويض هنا
-            # للبساطة، سنفترض أن التهيئة نجحت
-            return True
-        
-        return False
-    
-    async def _set_authentication_string(self) -> bool:
-        """تعيين سلسلة المصادقة"""
-        try:
-            auth_request = {
-                "@type": "setAuthenticationString",
-                "string": self.session_string
-            }
-            
-            await self._send_request(auth_request)
-            return True
-            
-        except Exception as e:
-            logger.error(f"خطأ في تعيين سلسلة المصادقة: {str(e)}")
-            return False
-    
-    async def _send_request(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """إرسال طلب إلى TDLib"""
-        try:
-            request_str = json.dumps(request)
-            tdjson.td_json_client_send(self.client, request_str.encode('utf-8'))
-            return None  # TDLib لا يعيد استجابة فورية
-        except Exception as e:
-            logger.error(f"خطأ في إرسال الطلب: {str(e)}")
-            return None
-    
-    async def add_chat_member(self, chat_id: int, user_id: int) -> bool:
-        """إضافة عضو إلى المجموعة"""
-        try:
-            # الحصول على معلومات المجموعة أولاً
-            get_chat_request = {
-                "@type": "getChat",
-                "chat_id": chat_id
-            }
-            
-            await self._send_request(get_chat_request)
-            
-            # إضافة العضو
-            add_member_request = {
-                "@type": "addChatMember",
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "forward_limit": 0
-            }
-            
-            await self._send_request(add_member_request)
-            
-            # انتظار قليل للتحقق من النجاح
-            await asyncio.sleep(2)
-            
-            logger.info(f"تم إرسال طلب إضافة العضو {user_id} للمجموعة {chat_id}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"خطأ في إضافة العضو: {str(e)}")
-            return False
-    
-    async def get_chat_info(self, chat_id: int) -> Optional[Dict[str, Any]]:
-        """الحصول على معلومات المجموعة"""
-        try:
-            request = {
-                "@type": "getChat",
-                "chat_id": chat_id
-            }
-            
-            await self._send_request(request)
-            return None  # سيتم معالجة الاستجابة في حلقة التحديثات
-            
-        except Exception as e:
-            logger.error(f"خطأ في الحصول على معلومات المجموعة: {str(e)}")
-            return None
-    
-    async def search_public_chat(self, username: str) -> Optional[Dict[str, Any]]:
-        """البحث عن مجموعة عامة"""
-        try:
-            request = {
-                "@type": "searchPublicChat",
-                "username": username
-            }
-            
-            await self._send_request(request)
-            return None
-            
-        except Exception as e:
-            logger.error(f"خطأ في البحث عن المجموعة العامة: {str(e)}")
-            return None
-    
-    async def close(self):
-        """إغلاق العميل"""
-        try:
-            if self.client:
-                self.is_initialized = False
-                tdjson.td_json_client_destroy(self.client)
-                self.client = None
-                logger.info("تم إغلاق عميل TDLib")
-        except Exception as e:
-            logger.error(f"خطأ في إغلاق عميل TDLib: {str(e)}")
-    
-    def __del__(self):
-        """تنظيف الموارد"""
-        if self.client:
+
+    async def _dispatcher_loop(self):
+        """توزيع الأحداث على المستقبلين"""
+        while not self._stop_event.is_set():
             try:
-                tdjson.td_json_client_destroy(self.client)
-            except:
-                pass
+                event = await self.event_queue.get()
+                event_type = event.get('@type')
+
+                if event_type == 'updateAuthorizationState':
+                    self.auth_state = event['authorization_state']['@type']
+                    self._auth_state_event.set()
+
+                if event_type in self._waiters:
+                    for future in self._waiters[event_type]:
+                        if not future.done():
+                            future.set_result(event)
+                    self._waiters[event_type] = []
+
+                self.event_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in transfer dispatcher loop: {e}")
+
+    async def _wait_for_response(self, event_type: str, timeout: float = 20.0) -> Optional[Dict[str, Any]]:
+        future = self.loop.create_future()
+        if event_type not in self._waiters: self._waiters[event_type] = []
+        self._waiters[event_type].append(future)
+        
+        error_future = self.loop.create_future()
+        if 'error' not in self._waiters: self._waiters['error'] = []
+        self._waiters['error'].append(error_future)
+
+        try:
+            done, pending = await asyncio.wait(
+                [future, error_future],
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=timeout
+            )
+            for task in pending: task.cancel()
+
+            if future in done:
+                return future.result()
+            return None
+        except asyncio.TimeoutError:
+            return None
+
+    async def initialize(self) -> bool:
+        """بدء تهيئة العميل"""
+        if not self._receiver_thread:
+            self.db_directory = tempfile.mkdtemp(prefix="tdlib_transf_")
+            self._receiver_thread = threading.Thread(target=self._receive_loop, daemon=True)
+            self._receiver_thread.start()
+            self._dispatcher_task = asyncio.create_task(self._dispatcher_loop())
+
+        params = {
+            '@type': 'setTdlibParameters',
+            'parameters': {
+                '@type': 'tdlibParameters',
+                'database_directory': self.db_directory,
+                'use_message_database': True,
+                'api_id': API_ID,
+                'api_hash': API_HASH,
+                'system_language_code': 'en',
+                'device_model': self.device_info.get('device_model', 'SM-G998B'),
+                'system_version': self.device_info.get('system_version', 'Android 12'),
+                'application_version': self.device_info.get('app_version', '1.0.0'),
+            }
+        }
+        self.send(params)
+        self.send({'@type': 'checkDatabaseEncryptionKey', 'encryption_key': ''})
+
+        # انتظار حالة المصادقة
+        await asyncio.sleep(1) # تبسيط للخطوة 1
+        self.is_initialized = True
+        return True
+
+    def send(self, query: Dict[str, Any]):
+        query_str = json.dumps(query).encode('utf-8')
+        tdjson.td_json_client_send(self.client, query_str)
+
+    async def add_chat_member(self, chat_id: int, user_id: int) -> bool:
+        """إضافة عضو (Placeholder logic for Step 1)"""
+        self.send({
+            '@type': 'addChatMember',
+            'chat_id': chat_id,
+            'user_id': user_id,
+            'forward_limit': 0
+        })
+        res = await self._wait_for_response('ok', timeout=5.0)
+        return res is not None
+
+    async def close(self):
+        self._stop_event.set()
+        if self._dispatcher_task: self._dispatcher_task.cancel()
+        if self.client:
+            tdjson.td_json_client_destroy(self.client)
+            self.client = None
+        if self.db_directory and os.path.exists(self.db_directory):
+            shutil.rmtree(self.db_directory, ignore_errors=True)
