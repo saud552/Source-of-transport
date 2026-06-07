@@ -1,0 +1,149 @@
+2026-06-07 07:51:28,365 - add.config - INFO - Loaded 29 device profiles from devices.json
+2026-06-07 07:51:28,365 - add.config - ERROR - فشل تحميل مكتبة TDLib: /app/libtdjson.so: file too short
+2026-06-07 07:51:28,431 - BotManager - INFO - Starting Add bot...
+2026-06-07 07:51:28,432 - BotManager - INFO - Starting Storage bot...
+2026-06-07 07:51:28,435 - BotManager - INFO - Starting Transfer bot...
+/app/transf/main.py:30: PTBUserWarning: If 'per_message=False', 'CallbackQueryHandler' will not be tracked for every message. Read this FAQ entry to learn more about the per_* settings: https://github.com/python-telegram-bot/python-telegram-bot/wiki/Frequently-Asked-Questions#what-do-the-per_-settings-in-conversationhandler-do.
+  conv_handler = ConversationHandler(
+2026-06-07 07:51:28,588 - transf.main - INFO - 🚀 Starting Transfer Bot database...
+2026-06-07 07:51:28,607 - storage.database - ERROR - PostgreSQL connection attempt 1 failed: connection was closed in the middle of operation
+2026-06-07 07:51:28,623 - add.database - ERROR - PostgreSQL connection attempt 1 failed: connection was closed in the middle of operation
+2026-06-07 07:51:28,730 - transf.database - ERROR - PostgreSQL connection attempt 1 failed: connection was closed in the middle of operation
+2026-06-07 07:51:30,769 - storage.database - ERROR - PostgreSQL connection attempt 2 failed: connection was closed in the middle of operation
+2026-06-07 07:51:30,783 - add.database - ERROR - PostgreSQL connection attempt 2 failed: connection was closed in the middle of operation
+2026-06-07 07:51:30,887 - transf.database - ERROR - PostgreSQL connection attempt 2 failed: connection was closed in the middle of operation
+2026-06-07 07:51:32,915 - storage.database - ERROR - PostgreSQL connection attempt 3 failed: connection was closed in the middle of operation
+2026-06-07 07:51:32,940 - add.database - ERROR - PostgreSQL connection attempt 3 failed: connection was closed in the middle of operation
+2026-06-07 07:51:33,047 - transf.database - ERROR - PostgreSQL connection attempt 3 failed: connection was closed in the middle of operation
+2026-06-07 07:51:35,059 - storage.database - ERROR - PostgreSQL connection attempt 4 failed: connection was closed in the middle of operation
+2026-06-07 07:51:35,099 - add.database - ERROR - PostgreSQL connection attempt 4 failed: connection was closed in the middle of operation
+2026-06-07 07:51:35,190 - transf.database - ERROR - PostgreSQL connection attempt 4 failed: connection was closed in the middle of operation
+2026-06-07 07:51:37,244 - storage.database - ERROR - PostgreSQL connection attempt 5 failed: connection was closed in the middle of operation
+2026-06-07 07:51:37,246 - BotManager - ERROR - Storage bot failed: connection was closed in the middle of operation
+Traceback (most recent call last):
+  File "/app/run_bots.py", line 14, in start_bot
+    try: func()
+         ^^^^^^
+  File "/app/storage/main.py", line 80, in main
+    asyncio.run(run_storage_bot())
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/app/storage/main.py", line 36, in run_storage_bot
+    await db_manager.connect()
+  File "/app/storage/database.py", line 19, in connect
+    self.pool = await asyncpg.create_pool(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/pool.py", line 439, in _async__init__
+    await self._initialize()
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/pool.py", line 466, in _initialize
+    await first_ch.connect()
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/pool.py", line 153, in connect
+    self._con = await self._pool._get_new_connection()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/pool.py", line 538, in _get_new_connection
+    con = await self._connect(
+          ^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/connection.py", line 2443, in connect
+    return await connect_utils._connect(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/connect_utils.py", line 1218, in _connect
+    conn = await _connect_addr(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/connect_utils.py", line 1050, in _connect_addr
+    return await __connect_addr(params, False, *args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/connect_utils.py", line 1102, in __connect_addr
+    await connected
+asyncpg.exceptions.ConnectionDoesNotExistError: connection was closed in the middle of operation
+2026-06-07 07:51:37,258 - add.database - ERROR - PostgreSQL connection attempt 5 failed: connection was closed in the middle of operation
+2026-06-07 07:51:37,259 - BotManager - ERROR - Add bot failed: connection was closed in the middle of operation
+Traceback (most recent call last):
+  File "/app/run_bots.py", line 14, in start_bot
+    try: func()
+         ^^^^^^
+  File "/app/add/main.py", line 85, in main
+    asyncio.run(run_bot())
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/app/add/main.py", line 25, in run_bot
+    await db_manager.connect()
+  File "/app/add/database.py", line 19, in connect
+    self.pool = await asyncpg.create_pool(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/pool.py", line 439, in _async__init__
+    await self._initialize()
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/pool.py", line 466, in _initialize
+    await first_ch.connect()
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/pool.py", line 153, in connect
+    self._con = await self._pool._get_new_connection()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/pool.py", line 538, in _get_new_connection
+    con = await self._connect(
+          ^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/connection.py", line 2443, in connect
+    return await connect_utils._connect(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/connect_utils.py", line 1218, in _connect
+    conn = await _connect_addr(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/connect_utils.py", line 1050, in _connect_addr
+    return await __connect_addr(params, False, *args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/connect_utils.py", line 1102, in __connect_addr
+    await connected
+asyncpg.exceptions.ConnectionDoesNotExistError: connection was closed in the middle of operation
+2026-06-07 07:51:37,334 - transf.database - ERROR - PostgreSQL connection attempt 5 failed: connection was closed in the middle of operation
+2026-06-07 07:51:37,336 - transf.main - CRITICAL - ❌ Critical error in Transfer Bot: connection was closed in the middle of operation
+Traceback (most recent call last):
+  File "/app/transf/main.py", line 64, in main
+    asyncio.run(bot.run_async())
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/app/transf/main.py", line 52, in run_async
+    await self.db_manager.connect()
+  File "/app/transf/database.py", line 19, in connect
+    self.pool = await asyncpg.create_pool(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/pool.py", line 439, in _async__init__
+    await self._initialize()
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/pool.py", line 466, in _initialize
+    await first_ch.connect()
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/pool.py", line 153, in connect
+    self._con = await self._pool._get_new_connection()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/pool.py", line 538, in _get_new_connection
+    con = await self._connect(
+          ^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/connection.py", line 2443, in connect
+    return await connect_utils._connect(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/connect_utils.py", line 1218, in _connect
+    conn = await _connect_addr(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/connect_utils.py", line 1050, in _connect_addr
+    return await __connect_addr(params, False, *args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/asyncpg/connect_utils.py", line 1102, in __connect_addr
+    await connected
+asyncpg.exceptions.ConnectionDoesNotExistError: connection was closed in the middle of operation

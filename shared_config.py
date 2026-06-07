@@ -42,3 +42,9 @@ TRANSFER_BOT_TOKEN = os.getenv('TRANSFER_BOT_TOKEN', '8664202831:AAFLn8vijJqr4Hb
 DEFAULT_COUNTRY_CODE = os.getenv('DEFAULT_COUNTRY_CODE', '+967')
 PHONE_VALIDATION_PATTERN = r'^\+\d{7,15}$'
 TDLIB_PATH = os.getenv('TDLIB_PATH', os.path.join(os.getcwd(), 'libtdjson.so'))
+
+# === Legacy Compatibility Paths ===
+ACCOUNTS_DB_PATH = 'accounts.db'
+STORAGE_DB_PATH = 'storage.db'
+SESSION_TIMEOUT = 60
+PAGE_SIZE = 5
