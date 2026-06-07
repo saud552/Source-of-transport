@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-عميل TDLib لإدارة جلسات التليجرام
+عميل TDLib لإدارة جلسات التليجرام (Thread-safe version)
 """
 
 import os
@@ -13,14 +13,15 @@ import zipfile
 import io
 import base64
 import logging
-from typing import Optional, Dict, Any
+import threading
+from typing import Optional, Dict, Any, List
 
 from .config import tdjson, API_ID, API_HASH
 
 logger = logging.getLogger(__name__)
 
 class TDLibClient:
-    """عميل TDLib لإدارة جلسات التليجرام"""
+    """عميل TDLib مع حلقة أحداث آمنة وخيوط معالجة موحدة"""
     
     def __init__(self, api_id: int, api_hash: str, device_info: Dict[str, str], 
                  phone: Optional[str] = None, db_directory: Optional[str] = None):
@@ -32,57 +33,92 @@ class TDLibClient:
         self.db_directory = db_directory or tempfile.mkdtemp()
         
         self.auth_state = None
-        self.auth_event = asyncio.Event()
         self.me = None
-        self.loop_task = None
 
-    def send(self, query: Dict[str, Any]):
-        """إرسال استعلام إلى TDLib"""
-        query_str = json.dumps(query).encode('utf-8')
-        tdjson.td_json_client_send(self.client, query_str)
+        # حلقة أحداث آمنة
+        self.event_queue = asyncio.Queue()
+        self.loop = asyncio.get_running_loop()
+        self._stop_event = threading.Event()
+        self._receiver_thread = None
+        self._dispatcher_task = None
 
-    def receive(self, timeout: float = 10.0) -> Optional[Dict[str, Any]]:
-        """استقبال استجابة من TDLib"""
-        result = tdjson.td_json_client_receive(self.client, timeout)
-        if result:
-            return json.loads(result.decode('utf-8'))
-        return None
+        # مستمعون للأحداث
+        self._auth_state_event = asyncio.Event()
+        self._waiters: Dict[str, List[asyncio.Future]] = {} # type: ignore
 
-    async def _event_loop(self):
-        """حلقة مخصصة لمعالجة الأحداث بشكل مستمر"""
-        logger.debug("Starting TDLib event loop.")
+    def _receive_loop(self):
+        """الخيط الوحيد المسؤول عن استدعاء receive من TDLib"""
+        logger.debug("Starting dedicated TDLib receiver thread.")
+        while not self._stop_event.is_set():
+            try:
+                # استدعاء receive بشكل حصرى هنا
+                result = tdjson.td_json_client_receive(self.client, 1.0)
+                if result:
+                    event = json.loads(result.decode('utf-8'))
+                    # دفع الحدث إلى queue الخاص بـ asyncio بشكل آمن
+                    self.loop.call_soon_threadsafe(self.event_queue.put_nowait, event)
+            except Exception as e:
+                logger.error(f"Error in receiver thread: {e}")
+                if "closed" in str(e).lower():
+                    break
+        logger.debug("Receiver thread finished.")
+
+    async def _dispatcher_loop(self):
+        """معالجة الأحداث القادمة من الـ queue وتوزيعها"""
         while True:
             try:
-                event = await asyncio.to_thread(self.receive, 1.0)
-                if event:
-                    logger.debug(f"Event received: {event.get('@type')}")
-                    if event.get('@type') == 'updateAuthorizationState':
-                        self.auth_state = event['authorization_state']['@type']
-                        logger.info(f"Authorization state updated: {self.auth_state}")
-                        self.auth_event.set()
-            except Exception as e:
-                logger.error(f"Error in event loop: {e}")
+                event = await self.event_queue.get()
+                event_type = event.get('@type')
+                logger.debug(f"Dispatcher received event: {event_type}")
+
+                if event_type == 'updateAuthorizationState':
+                    self.auth_state = event['authorization_state']['@type']
+                    logger.info(f"Auth state updated: {self.auth_state}")
+                    self._auth_state_event.set()
+
+                elif event_type == 'user' and event.get('id') == self.me_id if hasattr(self, 'me_id') else True:
+                    # معالجة بيانات المستخدم إذا كان هذا ردًا على getMe (بشكل مبسط)
+                    pass
+
+                # إخطار أي waiter ينتظر هذا النوع من الأحداث
+                # ملاحظة: يمكن تحسين هذا باستخدام @extra
+                if event_type in self._waiters:
+                    for future in self._waiters[event_type]:
+                        if not future.done():
+                            future.set_result(event)
+                    self._waiters[event_type] = []
+
+                self.event_queue.task_done()
+            except asyncio.CancelledError:
                 break
-            await asyncio.sleep(0.01)
+            except Exception as e:
+                logger.error(f"Error in dispatcher loop: {e}")
 
     async def _wait_for_state(self, expected_state: str, timeout: float = 30.0) -> bool:
-        """الانتظار حتى يتم الوصول إلى حالة مصادقة معينة"""
-        logger.info(f"Waiting for state: {expected_state}")
-        try:
-            async with asyncio.timeout(timeout):
-                while self.auth_state != expected_state:
-                    self.auth_event.clear()
-                    await self.auth_event.wait()
-            logger.info(f"Successfully reached state: {expected_state}")
-            return True
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout waiting for state {expected_state}. Current state: {self.auth_state}")
-            return False
+        """الانتظار حتى يتم الوصول إلى حالة مصادقة معينة عبر حلقة الأحداث"""
+        logger.info(f"Waiting for auth state: {expected_state}")
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.auth_state == expected_state:
+                return True
+
+            self._auth_state_event.clear()
+            try:
+                await asyncio.wait_for(self._auth_state_event.wait(), timeout=max(0.1, timeout - (time.time() - start_time)))
+            except asyncio.TimeoutError:
+                continue
+
+        logger.error(f"Timeout waiting for state {expected_state}. Current: {self.auth_state}")
+        return False
 
     async def start(self):
-        """بدء العميل وحلقة الأحداث"""
-        if not self.loop_task:
-            self.loop_task = asyncio.create_task(self._event_loop())
+        """بدء العميل والبدء فى استقبال الأحداث"""
+        if not self._receiver_thread:
+            self._receiver_thread = threading.Thread(target=self._receive_loop, daemon=True)
+            self._receiver_thread.start()
+
+        if not self._dispatcher_task:
+            self._dispatcher_task = asyncio.create_task(self._dispatcher_loop())
 
         # إرسال معاملات TDLib
         params = {
@@ -100,19 +136,21 @@ class TDLibClient:
         }
         self.send(params)
         
-        # انتظار حالة طلب مفتاح التشفير
         if not await self._wait_for_state('authorizationStateWaitEncryptionKey'):
             raise Exception("Failed to get authorizationStateWaitEncryptionKey")
         
-        # إرسال مفتاح التشفير (فارغ للجلسات الجديدة)
         self.send({'@type': 'checkDatabaseEncryptionKey', 'encryption_key': ''})
+
+    def send(self, query: Dict[str, Any]):
+        """إرسال استعلام إلى TDLib (آمن للخيوط)"""
+        query_str = json.dumps(query).encode('utf-8')
+        tdjson.td_json_client_send(self.client, query_str)
 
     async def login(self):
         """إدارة عملية تسجيل الدخول الكاملة"""
         await self.start()
         
         if self.auth_state == 'authorizationStateReady':
-            logger.info("Client is already authorized.")
             await self.get_me()
             return
 
@@ -125,45 +163,49 @@ class TDLibClient:
         if await self._wait_for_state('authorizationStateWaitCode', timeout=15):
             return
         
-        # Handle cases where it jumps to other states
         if self.auth_state == 'authorizationStateReady':
             await self.get_me()
 
     async def send_code(self, code: str):
-        """إرسال رمز التحقق"""
+        """إرسال رمز التحقق والانتظار عبر الـ queue"""
         self.send({'@type': 'checkAuthenticationCode', 'code': str(code)})
         await self._wait_for_state('authorizationStateReady', timeout=20)
-        if self.auth_state != 'authorizationStateReady':
-            if self.auth_state != 'authorizationStateWaitPassword':
-                raise Exception(f"Failed to login with code. Current state: {self.auth_state}")
+        if self.auth_state not in ['authorizationStateReady', 'authorizationStateWaitPassword']:
+            raise Exception(f"Failed to login with code. State: {self.auth_state}")
 
     async def send_password(self, password: str):
-        """إرسال كلمة المرور"""
+        """إرسال كلمة المرور والانتظار عبر الـ queue"""
         self.send({'@type': 'checkAuthenticationPassword', 'password': password})
         if not await self._wait_for_state('authorizationStateReady', timeout=20):
-            raise Exception(f"Failed to login with password. Current state: {self.auth_state}")
+            raise Exception(f"Failed to login with password. State: {self.auth_state}")
 
     async def get_me(self) -> Optional[Dict[str, Any]]:
-        """الحصول على معلومات المستخدم الحالي"""
+        """الحصول على معلومات المستخدم عبر نظام الانتظار الموحد"""
+        future = self.loop.create_future()
+        if 'user' not in self._waiters:
+            self._waiters['user'] = []
+        self._waiters['user'].append(future)
+
         self.send({'@type': 'getMe'})
-        async with asyncio.timeout(20):
-            while not self.me:
-                event = await asyncio.to_thread(self.receive, 1.0)
-                if event and event.get('@type') == 'user':
-                    self.me = event
-                    logger.info(f"User info received: {self.me.get('first_name')}")
-                    return self.me
-                elif event and event.get('@type') == 'error':
-                    raise Exception(f"TDLib error on getMe: {event.get('message')}")
-        return self.me
+
+        try:
+            event = await asyncio.wait_for(future, timeout=20.0)
+            self.me = event
+            return self.me
+        except asyncio.TimeoutError:
+            logger.error("Timeout waiting for getMe response")
+            return None
 
     async def close(self):
-        """إغلاق العميل وتنظيف الموارد"""
-        if self.loop_task:
-            self.loop_task.cancel()
+        """إغلاق العميل وتنظيف الموارد بشكل آمن"""
+        self._stop_event.set()
+        if self._dispatcher_task:
+            self._dispatcher_task.cancel()
+
         try:
             self.send({'@type': 'close'})
-            await asyncio.sleep(2)
+            # انتظار حتى يتم الإغلاق من طرف TDLib
+            await self._wait_for_state('authorizationStateClosed', timeout=5.0)
         finally:
             tdjson.td_json_client_destroy(self.client)
             if self.db_directory and os.path.exists(self.db_directory):
@@ -173,11 +215,12 @@ class TDLibClient:
                     logger.error(f"Error removing temp directory: {e}")
 
     def save_session(self) -> Optional[str]:
-        """حفظ الجلسة كمصفوفة بايت مشفرة"""
+        """حفظ الجلسة (بناءً على الملفات في المجلد المؤقت)"""
         if not self.db_directory:
             return None
         
-        time.sleep(2)
+        # التأكد من ثبات الملفات
+        time.sleep(1)
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
             for root, _, files in os.walk(self.db_directory):
@@ -205,64 +248,8 @@ class TDLibClient:
         await client.start()
         
         if not await client._wait_for_state('authorizationStateReady', timeout=20):
+            await client.close()
             raise Exception("Session is invalid or expired.")
         
         await client.get_me()
         return client
-
-    # ===== دوال مساعدة إضافية للتعامل مع المجموعات =====
-    async def search_public_chat(self, username: str) -> Optional[Dict[str, Any]]:
-        """البحث عن دردشة عامة"""
-        self.send({'@type': 'searchPublicChat', 'username': username})
-        async with asyncio.timeout(10):
-            while True:
-                event = await asyncio.to_thread(self.receive, 1.0)
-                if event and event.get('@type') == 'chat':
-                    return event
-                elif event and event.get('@type') == 'error':
-                    return None
-    
-    async def get_chat(self, chat_id: int) -> Optional[Dict[str, Any]]:
-        """الحصول على معلومات دردشة"""
-        self.send({'@type': 'getChat', 'chat_id': chat_id})
-        async with asyncio.timeout(10):
-            while True:
-                event = await asyncio.to_thread(self.receive, 1.0)
-                if event and event.get('@type') == 'chat':
-                    return event
-                elif event and event.get('@type') == 'error':
-                    return None
-                    
-    async def get_supergroup_full_info(self, supergroup_id: int) -> Optional[Dict[str, Any]]:
-        """الحصول على معلومات المجموعة الكاملة"""
-        self.send({'@type': 'getSupergroupFullInfo', 'supergroup_id': supergroup_id})
-        async with asyncio.timeout(10):
-            while True:
-                event = await asyncio.to_thread(self.receive, 1.0)
-                if event and event.get('@type') == 'supergroupFullInfo':
-                    return event
-                elif event and event.get('@type') == 'error':
-                    return None
-
-    async def get_supergroup_members(self, supergroup_id: int, offset: int = 0, 
-                                   limit: int = 200, 
-                                   filter_dict: Dict[str, Any] = None) -> list:
-        """الحصول على أعضاء المجموعة"""
-        if filter_dict is None:
-            filter_dict = {'@type': 'supergroupMembersFilterRecent'}
-            
-        self.send({
-            '@type': 'getSupergroupMembers',
-            'supergroup_id': supergroup_id,
-            'filter': filter_dict,
-            'offset': offset,
-            'limit': limit
-        })
-        async with asyncio.timeout(20):
-            while True:
-                event = await asyncio.to_thread(self.receive, 1.0)
-                if event and event.get('@type') == 'chatMembers':
-                    return event['members']
-                elif event and event.get('@type') == 'error':
-                    logger.error(f"Error getting members: {event['message']}")
-                    return []

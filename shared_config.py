@@ -16,7 +16,14 @@ ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '985612253').split(',') if x
 PASSPHRASE = os.getenv('ENCRYPTION_PASSPHRASE', 'default_pass').encode()
 SALT = os.getenv('ENCRYPTION_SALT', 'default_salt').encode()
 
-# === مسارات قواعد البيانات ===
+# === إعدادات PostgreSQL ===
+DB_HOST = os.getenv('DB_HOST', 'localhost')
+DB_PORT = int(os.getenv('DB_PORT', '5432'))
+DB_USER = os.getenv('DB_USER', 'postgres')
+DB_PASSWORD = os.getenv('DB_PASSWORD', 'postgres')
+DB_NAME = os.getenv('DB_NAME', 'telegram_bots')
+
+# === مسارات قواعد البيانات (للتوافق القديم) ===
 ACCOUNTS_DB_PATH = 'accounts.db'
 STORAGE_DB_PATH = 'storage.db'
 

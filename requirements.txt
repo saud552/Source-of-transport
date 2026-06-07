@@ -22,3 +22,4 @@ typing
 os
 sys
 pathlib
+asyncpg

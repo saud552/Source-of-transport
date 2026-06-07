@@ -1,168 +1,175 @@
 # -*- coding: utf-8 -*-
 """
-إدارة قاعدة البيانات والحسابات
+إدارة قاعدة البيانات والحسابات (PostgreSQL version)
 """
 
-import sqlite3
+import asyncpg
 import uuid
 import logging
+from typing import Optional, List, Dict, Any
+from shared_config import DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
-    """مدير قاعدة البيانات للحسابات"""
+    """مدير قاعدة البيانات للحسابات باستخدام PostgreSQL"""
     
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.init_db()
+    def __init__(self):
+        self.pool: Optional[asyncpg.Pool] = None
     
-    def init_db(self):
+    async def connect(self):
+        """إنشاء مجمع اتصالات قاعدة البيانات"""
+        try:
+            self.pool = await asyncpg.create_pool(
+                host=DB_HOST,
+                port=DB_PORT,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                database=DB_NAME
+            )
+            await self.init_db()
+            logger.info("تم الاتصال بـ PostgreSQL بنجاح")
+        except Exception as e:
+            logger.error(f"فشل الاتصال بـ PostgreSQL: {e}")
+            raise
+
+    async def init_db(self):
         """تهيئة قاعدة البيانات وإنشاء الجداول"""
-        cursor = self.conn.cursor()
-        
-        # جدول الفئات
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS categories (
-                id TEXT PRIMARY KEY,
-                name TEXT UNIQUE NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        async with self.pool.acquire() as conn:
+            # جدول الفئات
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS categories (
+                    id UUID PRIMARY KEY,
+                    name TEXT UNIQUE NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # جدول الحسابات
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS accounts (
+                    id UUID PRIMARY KEY,
+                    category_id UUID NOT NULL,
+                    username TEXT,
+                    session_str TEXT NOT NULL,
+                    phone TEXT NOT NULL,
+                    device_info TEXT NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    last_used TIMESTAMP WITH TIME ZONE,
+                    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+                )
+            ''')
+
+            # التأكد من وجود فئة "حسابات التخزين"
+            await conn.execute(
+                "INSERT INTO categories (id, name) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
+                uuid.uuid4(), "حسابات التخزين"
             )
-        ''')
-        
-        # جدول الحسابات
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS accounts (
-                id TEXT PRIMARY KEY,
-                category_id TEXT NOT NULL,
-                username TEXT,
-                session_str TEXT NOT NULL,
-                phone TEXT NOT NULL,
-                device_info TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_used TIMESTAMP,
-                FOREIGN KEY (category_id) REFERENCES categories(id)
-            )
-        ''')
-        
-        # التأكد من وجود فئة "حسابات التخزين"
-        cursor.execute(
-            "INSERT OR IGNORE INTO categories (id, name) VALUES (?, ?)",
-            (str(uuid.uuid4()), "حسابات التخزين")
-        )
-        
-        self.conn.commit()
     
-    def create_category(self, name: str) -> str:
+    async def create_category(self, name: str) -> str:
         """إنشاء فئة جديدة"""
-        category_id = str(uuid.uuid4())
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "INSERT OR IGNORE INTO categories (id, name) VALUES (?, ?)",
-            (category_id, name)
-        )
-        self.conn.commit()
-        return category_id
+        category_id = uuid.uuid4()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO categories (id, name) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
+                category_id, name
+            )
+        return str(category_id)
     
-    def get_category_by_name(self, name: str):
+    async def get_category_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """الحصول على فئة بالاسم"""
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM categories WHERE name = ?", (name,))
-        return cursor.fetchone()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM categories WHERE name = $1", name)
+            return dict(row) if row else None
     
-    def get_category_by_id(self, category_id: str):
+    async def get_category_by_id(self, category_id: str) -> Optional[Dict[str, Any]]:
         """الحصول على فئة بالمعرف"""
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM categories WHERE id = ?", (category_id,))
-        return cursor.fetchone()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM categories WHERE id = $1", uuid.UUID(category_id))
+            return dict(row) if row else None
     
-    def get_all_categories(self):
+    async def get_all_categories(self) -> List[Dict[str, Any]]:
         """الحصول على جميع الفئات مع عدد الحسابات"""
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            SELECT c.id, c.name, COUNT(a.id) as account_count
-            FROM categories c
-            LEFT JOIN accounts a ON c.id = a.category_id
-            GROUP BY c.id
-            ORDER BY c.created_at DESC
-        """)
-        return cursor.fetchall()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT c.id, c.name, COUNT(a.id) as account_count
+                FROM categories c
+                LEFT JOIN accounts a ON c.id = a.category_id
+                GROUP BY c.id, c.name
+                ORDER BY c.created_at DESC
+            """)
+            return [dict(row) for row in rows]
     
-    def create_account(self, category_id: str, username: str, session_str: str, 
+    async def create_account(self, category_id: str, username: str, session_str: str,
                       phone: str, device_info: str) -> str:
         """إنشاء حساب جديد"""
-        account_id = str(uuid.uuid4())
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "INSERT INTO accounts (id, category_id, username, session_str, phone, device_info) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (account_id, category_id, username, session_str, phone, device_info)
-        )
-        self.conn.commit()
-        return account_id
+        account_id = uuid.uuid4()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO accounts (id, category_id, username, session_str, phone, device_info) "
+                "VALUES ($1, $2, $3, $4, $5, $6)",
+                account_id, uuid.UUID(category_id), username, session_str, phone, device_info
+            )
+        return str(account_id)
     
-    def get_accounts_by_category(self, category_id: str):
+    async def get_accounts_by_category(self, category_id: str) -> List[Dict[str, Any]]:
         """الحصول على حسابات فئة معينة"""
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            SELECT id, phone, username, created_at, last_used
-            FROM accounts
-            WHERE category_id = ?
-            ORDER BY created_at DESC
-        """, (category_id,))
-        return cursor.fetchall()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id, phone, username, created_at, last_used, session_str, device_info
+                FROM accounts
+                WHERE category_id = $1
+                ORDER BY created_at DESC
+            """, uuid.UUID(category_id))
+            return [dict(row) for row in rows]
     
-    def get_account_by_id(self, account_id: str):
+    async def get_account_by_id(self, account_id: str) -> Optional[Dict[str, Any]]:
         """الحصول على حساب بالمعرف"""
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM accounts WHERE id = ?", (account_id,))
-        return cursor.fetchone()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM accounts WHERE id = $1", uuid.UUID(account_id))
+            return dict(row) if row else None
     
-    def get_account_by_phone(self, phone: str):
+    async def get_account_by_phone(self, phone: str) -> Optional[Dict[str, Any]]:
         """الحصول على حساب برقم الهاتف"""
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM accounts WHERE phone = ?", (phone,))
-        return cursor.fetchone()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM accounts WHERE phone = $1", phone)
+            return dict(row) if row else None
     
-    def delete_account(self, account_id: str) -> bool:
+    async def delete_account(self, account_id: str) -> bool:
         """حذف حساب"""
-        cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
-        self.conn.commit()
-        return cursor.rowcount > 0
+        async with self.pool.acquire() as conn:
+            result = await conn.execute("DELETE FROM accounts WHERE id = $1", uuid.UUID(account_id))
+            return "DELETE 1" in result
     
-    def update_account_session(self, account_id: str, session_str: str) -> bool:
+    async def update_account_session(self, account_id: str, session_str: str) -> bool:
         """تحديث جلسة الحساب"""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "UPDATE accounts SET session_str = ? WHERE id = ?",
-            (session_str, account_id)
-        )
-        self.conn.commit()
-        return cursor.rowcount > 0
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE accounts SET session_str = $1 WHERE id = $2",
+                session_str, uuid.UUID(account_id)
+            )
+            return "UPDATE 1" in result
     
-    def update_account_last_used(self, account_id: str):
+    async def update_account_last_used(self, account_id: str):
         """تحديث آخر استخدام للحساب"""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "UPDATE accounts SET last_used = CURRENT_TIMESTAMP WHERE id = ?",
-            (account_id,)
-        )
-        self.conn.commit()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE accounts SET last_used = CURRENT_TIMESTAMP WHERE id = $1",
+                uuid.UUID(account_id)
+            )
     
-    def get_storage_accounts(self):
+    async def get_storage_accounts(self) -> List[Dict[str, Any]]:
         """الحصول على حسابات التخزين"""
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            SELECT a.id, a.phone, a.session_str, a.device_info
-            FROM accounts a
-            JOIN categories c ON a.category_id = c.id
-            WHERE c.name = 'حسابات التخزين'
-        """)
-        return cursor.fetchall()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT a.id, a.phone, a.session_str, a.device_info
+                FROM accounts a
+                JOIN categories c ON a.category_id = c.id
+                WHERE c.name = 'حسابات التخزين'
+            """)
+            return [dict(row) for row in rows]
     
-    def close(self):
-        """إغلاق اتصال قاعدة البيانات"""
-        if self.conn:
-            self.conn.close()
+    async def close(self):
+        """إغلاق مجمع اتصالات قاعدة البيانات"""
+        if self.pool:
+            await self.pool.close()
