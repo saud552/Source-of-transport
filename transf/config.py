@@ -85,3 +85,8 @@ tdjson.td_json_client_receive.argtypes = [ctypes.c_void_p, ctypes.c_double]
 MAX_MEMBERS_PER_BATCH = 10  # عدد الأعضاء في كل دفعة
 TRANSFER_DELAY = 2  # تأخير بين كل عملية نقل (ثواني)
 MAX_RETRIES = 3  # عدد المحاولات عند الفشل
+# === إعدادات النقل المتقدمة (Behavior Simulation) ===
+MIN_JITTER_DELAY = float(os.getenv('MIN_JITTER_DELAY', '5.0'))
+MAX_JITTER_DELAY = float(os.getenv('MAX_JITTER_DELAY', '15.0'))
+BATCH_ROTATE_DELAY = float(os.getenv('BATCH_ROTATE_DELAY', '30.0'))
+ACCOUNT_WAIT_TIMEOUT = float(os.getenv('ACCOUNT_WAIT_TIMEOUT', '60.0'))

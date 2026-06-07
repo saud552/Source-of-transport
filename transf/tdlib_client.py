@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-عميل TDLib للنقل (P1/P2 Remediation Version)
+عميل TDLib للنقل (Enhanced Logging Version)
 """
 
 import asyncio
@@ -13,6 +13,7 @@ import shutil
 import os
 import uuid
 from typing import Dict, Any, Optional, List
+from datetime import datetime
 
 from shared_config import API_ID, API_HASH
 from transf.config import tdjson
@@ -20,7 +21,7 @@ from transf.config import tdjson
 logger = logging.getLogger(__name__)
 
 class TDLibClient:
-    """عميل TDLib للنقل مع حماية Flood Wait وتعقب الاستجابة"""
+    """عميل TDLib للنقل مع حماية Flood Wait وتعقب الاستجابة وتدوين مفصل"""
     
     def __init__(self, phone: str, session_string: str, device_info: Dict[str, Any]):
         self.phone = phone
@@ -50,7 +51,7 @@ class TDLibClient:
                     self.loop.call_soon_threadsafe(self.event_queue.put_nowait, event)
             except Exception as e:
                 if not self._stop_event.is_set():
-                    logger.error(f"Error in transfer receiver thread ({self.phone}): {e}")
+                    logger.error(f"[{self.phone}] Receiver thread error: {e}")
                 break
 
     async def _dispatcher_loop(self):
@@ -62,8 +63,8 @@ class TDLibClient:
 
                 if event_type == 'updateAuthorizationState':
                     self.auth_state = event['authorization_state']['@type']
+                    logger.debug(f"[{self.phone}] Auth State: {self.auth_state}")
 
-                # Resolve waiting requests
                 if extra_id and extra_id in self._waiters:
                     future = self._waiters.pop(extra_id)
                     if not future.done():
@@ -73,7 +74,7 @@ class TDLibClient:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in transfer dispatcher loop ({self.phone}): {e}")
+                logger.error(f"[{self.phone}] Dispatcher error: {e}")
 
     async def call_method(self, method: str, params: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
         extra_id = str(uuid.uuid4())
@@ -91,14 +92,16 @@ class TDLibClient:
             if result.get('@type') == 'error':
                 code = result.get('code')
                 message = result.get('message', '')
+                logger.error(f"[{self.phone}] Method {method} failed: {code} - {message}")
                 if code == 429:
                     match = re.search(r'\d+', message)
                     retry_after = int(match.group()) if match else 60
                     self.flood_until = asyncio.get_event_loop().time() + retry_after
-                    logger.warning(f"Account {self.phone} flood waited for {retry_after}s")
+                    logger.warning(f"[{self.phone}] FLOOD WAIT triggered. Locked until {datetime.fromtimestamp(self.flood_until)}")
             return result
         except asyncio.TimeoutError:
             self._waiters.pop(extra_id, None)
+            logger.error(f"[{self.phone}] Method {method} timed out after {timeout}s")
             return {'@type': 'error', 'code': 408, 'message': 'Request timeout'}
 
     async def initialize(self) -> bool:
@@ -124,13 +127,12 @@ class TDLibClient:
         await self.call_method('setTdlibParameters', params)
         await self.call_method('checkDatabaseEncryptionKey', {'encryption_key': ''})
 
-        # In a real scenario, we'd handle checkAuthenticationString here.
-        # Assuming the session_string logic is handled or the account is already ready.
         self.is_initialized = True
+        logger.info(f"[{self.phone}] TDLib client initialized successfully.")
         return True
 
     async def add_chat_member(self, chat_id: int, user_id: int) -> Dict[str, Any]:
-        """إضافة عضو مع تعقب النتيجة الفعلية"""
+        logger.info(f"[{self.phone}] Attempting to add user {user_id} to chat {chat_id}")
         params = {
             'chat_id': chat_id,
             'user_id': user_id,
@@ -146,3 +148,4 @@ class TDLibClient:
             self.client = None
         if self.db_directory and os.path.exists(self.db_directory):
             shutil.rmtree(self.db_directory, ignore_errors=True)
+            logger.info(f"[{self.phone}] Temp directory cleaned up.")
