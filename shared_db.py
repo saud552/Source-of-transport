@@ -9,11 +9,10 @@ logger = logging.getLogger("Database")
 
 
 
+
 async def get_db_pool():
     """Returns a new connection pool for the current event loop, with robust SSL fallback."""
-    dsn = os.getenv('DATABASE_URL')
-    if not dsn:
-        dsn = f"postgres://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    dsn = os.getenv('DATABASE_URL', '')
 
     import ssl
     ssl_context = ssl.create_default_context()
@@ -22,7 +21,11 @@ async def get_db_pool():
 
     try:
         pool = await asyncpg.create_pool(
-            dsn,
+            host=DB_HOST,
+            port=DB_PORT,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
             ssl=ssl_context,
             min_size=1,
             max_size=5,
@@ -30,13 +33,17 @@ async def get_db_pool():
         )
         async with pool.acquire() as conn:
             await conn.execute("SELECT 1")
-        logger.info("Database pool created successfully with ssl_context via DSN")
+        logger.info("Database pool created successfully with ssl_context via explicit kwargs")
         return pool
     except Exception as e:
-        logger.warning(f"Failed DB connection via DSN + SSLContext: {e}")
+        logger.warning(f"Failed DB connection via explicit kwargs + SSLContext: {e}")
         try:
             pool = await asyncpg.create_pool(
-                dsn,
+                host=DB_HOST,
+                port=DB_PORT,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                database=DB_NAME,
                 ssl='require',
                 min_size=1,
                 max_size=5,
@@ -44,8 +51,8 @@ async def get_db_pool():
             )
             async with pool.acquire() as conn:
                 await conn.execute("SELECT 1")
-            logger.info("Database pool created successfully with ssl='require' via DSN")
+            logger.info("Database pool created successfully with ssl='require' via explicit kwargs")
             return pool
         except Exception as e2:
-            logger.error(f"Failed DB connection via DSN + require: {e2}")
+            logger.error(f"Failed DB connection via explicit kwargs + require: {e2}")
             raise Exception(f"All DB connection attempts failed. Last error: {e2}")
