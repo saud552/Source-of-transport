@@ -1,19 +1,9 @@
 import os, sys, time, threading, logging, asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# --- LD_LIBRARY_PATH INJECTION ---
-# TDLib requires libssl.so.1.1 which isn't standard on Render Ubuntu 22.04.
-# We download it into the project root. If the project root isn't in LD_LIBRARY_PATH,
-# we add it and re-execute the script so the OS linker resolves it natively without breaking Python's ssl.
-current_dir = os.path.dirname(os.path.abspath(__file__))
-ld_path = os.environ.get("LD_LIBRARY_PATH", "")
-if current_dir not in ld_path:
-    os.environ["LD_LIBRARY_PATH"] = current_dir + (":" + ld_path if ld_path else "")
-    os.execv(sys.executable, [sys.executable] + sys.argv)
-# --------------------------------
 
 # Force project root into path
-sys.path.insert(0, current_dir)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

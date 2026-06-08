@@ -47,6 +47,17 @@ except Exception as e:
 from shared_config import TDLIB_PATH
 import os, ctypes
 
+# TDLib 1.8.0 needs OpenSSL 1.1 but Python needs OpenSSL 3.
+# We download libssl1.1 and libcrypto1.1 locally and load them explicitly
+# ONLY into the local scope so it doesn't hijack Python's global ssl.
+try:
+    if os.path.exists('libcrypto.so.1.1'):
+        ctypes.CDLL(os.path.abspath('libcrypto.so.1.1'), mode=ctypes.RTLD_LOCAL)
+    if os.path.exists('libssl.so.1.1'):
+        ctypes.CDLL(os.path.abspath('libssl.so.1.1'), mode=ctypes.RTLD_LOCAL)
+except Exception as e:
+    logger.warning(f"Failed to preload local libssl/libcrypto: {e}")
+
 if not os.path.exists(TDLIB_PATH):
     logger.error(f"المكتبة غير موجودة في المسار المتوقع: {TDLIB_PATH}")
     if 'test' not in sys.argv[0]:

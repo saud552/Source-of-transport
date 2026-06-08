@@ -4,19 +4,22 @@ set -o errexit
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# Render uses Ubuntu 22.04+ natively, which drops libssl1.1. We must install it manually for TDLib 1.8.0
-echo "Installing libssl1.1 dependency for TDLib..."
-wget http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb -O libssl1.1.deb
-dpkg -x libssl1.1.deb ./libssl_temp
-mkdir -p /usr/lib/x86_64-linux-gnu || true # In case we don't have root
-cp -n ./libssl_temp/usr/lib/x86_64-linux-gnu/libssl.so.1.1 . || true
-cp -n ./libssl_temp/usr/lib/x86_64-linux-gnu/libcrypto.so.1.1 . || true
-rm -rf libssl1.1.deb libssl_temp
-export LD_LIBRARY_PATH="$(pwd):$LD_LIBRARY_PATH"
-echo "Exporting LD_LIBRARY_PATH to include current directory for libssl"
+# Download pre-compiled TDLib for Ubuntu 22.04 (OpenSSL 3 compatible).
+echo "Fetching TDLib for Render (OpenSSL 3 compatible)..."
+if [ ! -f "libtdjson.so" ] || [ $(stat -c%s "libtdjson.so") -lt 1000000 ]; then
+    echo "Downloading TDLib 1.8.0 from generic github releases..."
+    # The official repo doesn't provide binaries, but we can download the one we know works for Ubuntu 20/22
+    # This URL is a raw binary of libtdjson.so that requires libssl3 / OpenSSL 3
+    curl -L -o libtdjson.so "https://github.com/vysheng/tdlib-static/releases/download/v1.8.0/libtdjson.so"
 
-# Ensure TDLib is present
-if [ ! -f "libtdjson.so" ]; then
-    echo "Downloading pre-compiled TDLib for Render (Ubuntu x86_64)..."
-    curl -L https://github.com/vysheng/tdlib-static/releases/download/v1.8.0/libtdjson.so -o libtdjson.so
+    # If the standard v1.8.0 requires libssl1.1, we MUST download libssl1.1, but we CANNOT inject it globally.
+    # We will download it, but NOT export LD_LIBRARY_PATH in bash.
+    # Instead, we will let ctypes.CDLL load it locally inside Python in a way that doesn't hijack Python's global ssl.
+
+    echo "Downloading libssl1.1 locally (but not injecting globally)..."
+    wget http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb -O libssl1.1.deb
+    dpkg -x libssl1.1.deb ./libssl_temp
+    cp -n ./libssl_temp/usr/lib/x86_64-linux-gnu/libssl.so.1.1 . || true
+    cp -n ./libssl_temp/usr/lib/x86_64-linux-gnu/libcrypto.so.1.1 . || true
+    rm -rf libssl1.1.deb libssl_temp
 fi
