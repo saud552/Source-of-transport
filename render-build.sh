@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -o errexit
 
-pip install --upgrade pip
-pip install -r requirements.txt
+# Install everything using the active Python executable
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 
-# Download pre-compiled TDLib for Ubuntu 22.04 (OpenSSL 3 compatible).
+# The previous static vysheng build relied on OpenSSL 1.1 which breaks Python 3.14 on Render.
+# We download the official pytdbot/libtdjson which is built with modern OpenSSL 3 support.
 echo "Fetching TDLib for Render (OpenSSL 3 compatible)..."
 if [ ! -f "libtdjson.so" ] || [ $(stat -c%s "libtdjson.so") -lt 1000000 ]; then
     echo "Downloading TDLib 1.8.0 from generic github releases..."
