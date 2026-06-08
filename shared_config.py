@@ -15,11 +15,14 @@ ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '985612253').split(',') if x
 PASSPHRASE = os.getenv('ENCRYPTION_PASSPHRASE', 'default_pass').encode()
 SALT = os.getenv('ENCRYPTION_SALT', 'default_salt').encode()
 
+
 # PostgreSQL Settings (Parsed from DATABASE_URL if available)
 DATABASE_URL = os.getenv('DATABASE_URL')
 if DATABASE_URL:
-    # Parsing DATABASE_URL: postgres://user:password@host:port/dbname
     from urllib.parse import urlparse
+    # asyncpg create_pool actually accepts the raw DSN string natively and correctly handles it.
+    # The previous ValueError was likely related to ipaddress checks, but passing the DSN as string is the standard way.
+    # Let's extract exactly what asyncpg needs.
     url = urlparse(DATABASE_URL)
     DB_HOST = url.hostname
     DB_PORT = url.port or 5432
@@ -27,6 +30,7 @@ if DATABASE_URL:
     DB_PASSWORD = url.password
     DB_NAME = url.path[1:]
 else:
+
     DB_HOST = os.getenv('DB_HOST', '127.0.0.1')
     DB_PORT = int(os.getenv('DB_PORT', '5432'))
     DB_USER = os.getenv('DB_USER', 'postgres')
