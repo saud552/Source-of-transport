@@ -1,19 +1,27 @@
 import os, sys, time, threading, logging, asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+
 # Force project root into path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("BotManager")
 
 def run_health_server():
+
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
             self.wfile.write(b"OK")
+        def do_HEAD(self):
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), H)
     logger.info(f"Health server live on port {port}")
