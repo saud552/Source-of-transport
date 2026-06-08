@@ -118,7 +118,11 @@ class TDLibClient:
 
         params = {
             '@type': 'setTdlibParameters',
+            'use_test_dc': False,
             'database_directory': self.db_directory,
+            'files_directory': self.db_directory,
+            'use_file_database': True,
+            'use_chat_info_database': True,
             'use_message_database': True,
             'use_secret_chats': True,
             'api_id': self.api_id,
