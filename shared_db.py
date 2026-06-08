@@ -2,6 +2,7 @@ import asyncpg
 import os
 import logging
 import asyncio
+import ssl
 from shared_config import DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 
 logger = logging.getLogger("Database")
@@ -12,8 +13,15 @@ async def get_db_pool():
     if not dsn:
         dsn = f"postgres://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
+
     # Render requires SSL
-    ssl_mode = 'require' if 'render.com' in dsn or 'DB_HOST' in os.environ else None
+    if 'render.com' in dsn or 'DB_HOST' in os.environ:
+        ssl_mode = ssl.create_default_context()
+        ssl_mode.check_hostname = False
+        ssl_mode.verify_mode = ssl.CERT_NONE
+    else:
+        ssl_mode = None
+
 
 
     for attempt in range(3):

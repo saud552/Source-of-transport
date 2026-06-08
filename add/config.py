@@ -42,9 +42,21 @@ except Exception as e:
     logger.error(f"Failed to load devices.json: {e}")
     DEVICES = [{'device_model': 'Generic Android', 'system_version': 'Android 14', 'app_version': 'Telegram 10.0', 'lang_code': 'en', 'lang_pack': 'android'}]
 
+
 # === تحميل مكتبة TDLib ===
 from shared_config import TDLIB_PATH
+import os, ctypes
+
+# Pre-load legacy SSL libraries manually before TDLib so it resolves dependencies
+try:
+    if os.path.exists('libssl.so.1.1') and os.path.exists('libcrypto.so.1.1'):
+        ctypes.CDLL(os.path.abspath('libcrypto.so.1.1'), mode=ctypes.RTLD_GLOBAL)
+        ctypes.CDLL(os.path.abspath('libssl.so.1.1'), mode=ctypes.RTLD_GLOBAL)
+except Exception as e:
+    logger.warning(f"Failed to preload local libssl/libcrypto: {e}")
+
 if not os.path.exists(TDLIB_PATH):
+
     logger.error(f"المكتبة غير موجودة في المسار المتوقع: {TDLIB_PATH}")
     if 'test' not in sys.argv[0]:
         pass
