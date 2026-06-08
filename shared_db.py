@@ -15,15 +15,21 @@ async def get_db_pool():
     # Render requires SSL
     ssl_mode = 'require' if 'render.com' in dsn or 'DB_HOST' in os.environ else None
 
+
     for attempt in range(3):
         try:
             pool = await asyncpg.create_pool(
-                dsn,
+                host=DB_HOST,
+                port=DB_PORT,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                database=DB_NAME,
                 ssl=ssl_mode,
                 min_size=1,
                 max_size=5,
                 command_timeout=60
             )
+
             # Connectivity check
             async with pool.acquire() as conn:
                 await conn.execute("SELECT 1")
