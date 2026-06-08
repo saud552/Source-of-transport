@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-وحدات التشفير وفك التشفير للجلسات
+وحدات التشفير وفك التشفير للجلسات (AES-256-CBC)
 """
 
 import base64
@@ -13,15 +13,15 @@ from Crypto.Util.Padding import pad, unpad
 logger = logging.getLogger(__name__)
 
 class EncryptionManager:
-    """مدير التشفير للجلسات"""
+    """مدير التشفير للجلسات باستخدام AES-256-CBC"""
     
     def __init__(self, passphrase: bytes, salt: bytes):
         self.passphrase = passphrase
         self.salt = salt
         self._key = None
     
-    def get_encryption_key(self):
-        """إعادة استخدام مفتاح التشفير المحسوب مسبقاً"""
+    def get_encryption_key(self) -> bytes:
+        """إعادة استخدام مفتاح التشفير المحسوب مسبقاً عبر PBKDF2"""
         if self._key is None:
             self._key = PBKDF2(
                 self.passphrase,
@@ -32,34 +32,29 @@ class EncryptionManager:
             )
         return self._key
     
-    def encrypt_session(self, session_bytes: bytes) -> str:
-        """تشفير جلسة TDLib باستخدام AES-CBC"""
+    def encrypt(self, data: bytes) -> bytes:
+        """تشفير البيانات الخام باستخدام AES-CBC"""
         try:
             key = self.get_encryption_key()
             cipher = AES.new(key, AES.MODE_CBC)
-            ct_bytes = cipher.encrypt(pad(session_bytes, AES.block_size))
-            encrypted = cipher.iv + ct_bytes  # IV + النص المشفر
-            return base64.b64encode(encrypted).decode('utf-8')
+            ct_bytes = cipher.encrypt(pad(data, AES.block_size))
+            return cipher.iv + ct_bytes  # إرجاع IV مدمج مع النص المشفر
         except Exception as e:
-            logger.error(f"خطأ في تشفير الجلسة: {str(e)}")
+            logger.error(f"خطأ في تشفير البيانات: {str(e)}")
             raise e
     
-    def decrypt_session(self, encrypted_session: str) -> bytes:
-        """فك تشفير جلسة TDLib باستخدام AES-CBC"""
+    def decrypt(self, encrypted_data: bytes) -> bytes:
+        """فك تشفير البيانات الخام باستخدام AES-CBC"""
         try:
-            key = self.get_encryption_key()
-            encrypted = base64.b64decode(encrypted_session.encode('utf-8'))
-            
-            # التحقق من طول البيانات
-            if len(encrypted) < 16:
-                raise ValueError("البيانات المشفرة أقصر من الطول المتوقع")
+            if len(encrypted_data) < 16:
+                raise ValueError("البيانات المشفرة أقصر من طول IV المتوقع")
                 
-            iv = encrypted[:16]  # أول 16 بايت هي IV
-            ct = encrypted[16:]
+            key = self.get_encryption_key()
+            iv = encrypted_data[:16]
+            ct = encrypted_data[16:]
             
             cipher = AES.new(key, AES.MODE_CBC, iv=iv)
-            decrypted = unpad(cipher.decrypt(ct), AES.block_size)
-            return decrypted
+            return unpad(cipher.decrypt(ct), AES.block_size)
         except Exception as e:
-            logger.error(f"خطأ في فك تشفير الجلسة: {str(e)}")
+            logger.error(f"خطأ في فك تشفير البيانات: {str(e)}")
             raise e

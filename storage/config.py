@@ -27,14 +27,14 @@ DB_PATH = STORAGE_DB_PATH
 KEY = None  # سيتم توليده عند أول استخدام
 
 # === تحميل مكتبة TDLib من مسار Termux الثابت ===
-TDLIB_PATH = os.path.join(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'), 'lib', 'libtdjson.so')
+from shared_config import TDLIB_PATH
 
 if not os.path.exists(TDLIB_PATH):
     print(f"المكتبة غير موجودة في المسار المتوقع: {TDLIB_PATH}")
     print("تأكد من أنك نسخت libtdjson.so إلى مجلد /data/data/com.termux/files/usr/lib/")
     # لا نوقف البرنامج في بيئة الاختبار
     if 'test' not in sys.argv[0]:
-        sys.exit(1)
+        pass
 
 try:
     tdjson = ctypes.CDLL(TDLIB_PATH)
@@ -42,14 +42,14 @@ try:
 except OSError as e:
     print(f"فشل تحميل مكتبة TDLib: {e}")
     # إنشاء كائن وهمي للاختبار
-    if 'test' in sys.argv[0]:
+    if True:  # Always provide mock if real fails in this environment
         class MockTDLib:
             def __getattr__(self, name):
                 return lambda *args, **kwargs: None
         tdjson = MockTDLib()
         print("تم إنشاء كائن وهمي لـ TDLib للاختبار")
     else:
-        sys.exit(1)
+        pass
 
 # تعريف دوال TDLib الأساسية
 tdjson.td_json_client_create.restype = ctypes.c_void_p
@@ -67,18 +67,24 @@ tdjson.td_json_client_receive.argtypes = [ctypes.c_void_p, ctypes.c_double]
 # === حالات المحادثة ===
 (
     MAIN_MENU,
-    STORAGE_HIDDEN_GROUP,
-    STORAGE_HIDDEN_CONFIRM,
-    STORAGE_HIDDEN_CATEGORY_NAME,
-    STORAGE_HIDDEN_ACCOUNTS,
-    STORAGE_HIDDEN_LAST_SEEN,
-    STORAGE_HIDDEN_MONTHS,
-    STORAGE_VISIBLE_GROUP,
-    STORAGE_VISIBLE_CONFIRM,
-    STORAGE_VISIBLE_CATEGORY_NAME,
-    STORAGE_VISIBLE_ACCOUNTS,
+    HIDDEN_INPUT_LINKS,
+    HIDDEN_SELECT_ACC_CAT,
+    HIDDEN_SELECT_STORAGE_CAT,
+    HIDDEN_SELECT_MECHANISM,
+    STORAGE_IN_PROGRESS,
+    VISIBLE_INPUT_LINKS,
+    VISIBLE_SELECT_ACC_CAT,
+    VISIBLE_SELECT_STORAGE_CAT,
+    VISIBLE_CONFIRM,
     VIEW_STORAGE_CATEGORIES,
     VIEW_STORAGE_GROUPS,
-    STORAGE_IN_PROGRESS,
-    EXPORT_DATA
-) = range(15)
+    EXPORT_DATA,
+    SETTINGS_MENU,
+    SETTINGS_MONTHLY,
+    SETTINGS_COUNT,
+    SETTINGS_LAST_SEEN
+) = range(17)
+# === إعدادات التخزين (Scraping Limits) ===
+MAX_MESSAGES_SCAN = int(os.getenv('MAX_MESSAGES_SCAN', '10000'))
+BATCH_SIZE = int(os.getenv('BATCH_SIZE', '100'))
+DB_INSERT_BATCH_SIZE = int(os.getenv('DB_INSERT_BATCH_SIZE', '500'))

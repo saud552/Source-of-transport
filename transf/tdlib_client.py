@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-عميل TDLib للنقل
+عميل TDLib للنقل (Enhanced Logging Version)
 """
 
 import asyncio
 import json
 import logging
-import ctypes
-from typing import Dict, Any, Optional
-
-import sys
+import threading
+import re
+import tempfile
+import shutil
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import uuid
+from typing import Dict, Any, Optional, List
+from datetime import datetime
 
 from shared_config import API_ID, API_HASH
 from transf.config import tdjson
@@ -19,231 +21,154 @@ from transf.config import tdjson
 logger = logging.getLogger(__name__)
 
 class TDLibClient:
-    """عميل TDLib للنقل"""
+    """عميل TDLib للنقل مع حماية Flood Wait وتعقب الاستجابة وتدوين مفصل"""
     
-    def __init__(self, session_string: str, device_info: str):
+    def __init__(self, phone: str, session_string: str, device_info: Dict[str, Any]):
+        self.phone = phone
         self.session_string = session_string
-        self.device_info = json.loads(device_info) if isinstance(device_info, str) else device_info
-        self.client = None
+        self.device_info = device_info
+        self.client = tdjson.td_json_client_create()
+
         self.is_initialized = False
-        self._update_handlers = {}
-    
-    async def initialize(self) -> bool:
-        """تهيئة العميل"""
-        try:
-            # إنشاء العميل
-            self.client = tdjson.td_json_client_create()
-            if not self.client:
-                logger.error("فشل في إنشاء عميل TDLib")
-                return False
-            
-            # إعداد معالج التحديثات
-            asyncio.create_task(self._update_loop())
-            
-            # إرسال طلب التهيئة
-            init_request = {
-                "@type": "setTdlibParameters",
-                "parameters": {
-                    "@type": "tdlibParameters",
-                    "use_test_dc": False,
-                    "database_directory": "/tmp/tdlib",
-                    "files_directory": "/tmp/tdlib",
-                    "use_file_database": True,
-                    "use_chat_info_database": True,
-                    "use_message_database": True,
-                    "use_secret_chats": True,
-                    "api_id": API_ID,
-                    "api_hash": API_HASH,
-                    "system_language_code": "en",
-                    "device_model": self.device_info.get('device_model', 'Unknown'),
-                    "system_version": self.device_info.get('system_version', 'Unknown'),
-                    "application_version": self.device_info.get('app_version', '1.0.0'),
-                    "enable_storage_optimizer": True,
-                    "ignore_file_names": False
-                }
-            }
-            
-            await self._send_request(init_request)
-            
-            # انتظار التهيئة
-            await self._wait_for_authorization()
-            
-            # تسجيل الدخول بالجلسة
-            if not await self._set_authentication_string():
-                return False
-            
-            self.is_initialized = True
-            logger.info("تم تهيئة عميل TDLib بنجاح")
-            return True
-            
-        except Exception as e:
-            logger.error(f"خطأ في تهيئة عميل TDLib: {str(e)}")
-            return False
-    
-    async def _update_loop(self):
-        """حلقة معالجة التحديثات"""
-        while self.client and self.is_initialized:
+        self.auth_state = None
+        self.db_directory = None
+        self.flood_until = 0  # timestamp
+
+        self.event_queue = asyncio.Queue()
+        self.loop = asyncio.get_running_loop()
+        self._stop_event = threading.Event()
+        self._receiver_thread = None
+        self._dispatcher_task = None
+
+        self._waiters: Dict[str, asyncio.Future] = {}
+
+    def _receive_loop(self):
+        while not self._stop_event.is_set():
             try:
-                # استقبال التحديثات
-                update = tdjson.td_json_client_receive(self.client, 1.0)
-                if update:
-                    update_str = update.decode('utf-8')
-                    update_data = json.loads(update_str)
-                    await self._handle_update(update_data)
-                
-                await asyncio.sleep(0.1)
+                result = tdjson.td_json_client_receive(self.client, 1.0)
+                if result:
+                    event = json.loads(result.decode('utf-8'))
+                    self.loop.call_soon_threadsafe(self.event_queue.put_nowait, event)
             except Exception as e:
-                logger.error(f"خطأ في حلقة التحديثات: {str(e)}")
+                if not self._stop_event.is_set():
+                    logger.error(f"[{self.phone}] Receiver thread error: {e}")
                 break
-    
-    async def _handle_update(self, update: Dict[str, Any]):
-        """معالجة التحديثات"""
-        update_type = update.get("@type")
-        
-        if update_type == "updateAuthorizationState":
-            await self._handle_authorization_state(update)
-        elif update_type == "updateConnectionState":
-            await self._handle_connection_state(update)
-        elif update_type == "error":
-            logger.error(f"خطأ من TDLib: {update.get('message', 'Unknown error')}")
-    
-    async def _handle_authorization_state(self, update: Dict[str, Any]):
-        """معالجة حالة التفويض"""
-        state = update.get("authorization_state", {})
-        state_type = state.get("@type")
-        
-        if state_type == "authorizationStateReady":
-            logger.info("تم تسجيل الدخول بنجاح")
-        elif state_type == "authorizationStateLoggingOut":
-            logger.info("جاري تسجيل الخروج")
-        elif state_type == "authorizationStateClosed":
-            logger.info("تم إغلاق الجلسة")
-    
-    async def _handle_connection_state(self, update: Dict[str, Any]):
-        """معالجة حالة الاتصال"""
-        state = update.get("state", {})
-        state_type = state.get("@type")
-        
-        if state_type == "connectionStateReady":
-            logger.info("الاتصال جاهز")
-        elif state_type == "connectionStateConnecting":
-            logger.info("جاري الاتصال")
-        elif state_type == "connectionStateConnectingToProxy":
-            logger.info("جاري الاتصال عبر البروكسي")
-    
-    async def _wait_for_authorization(self, timeout: int = 30) -> bool:
-        """انتظار التفويض"""
-        start_time = asyncio.get_event_loop().time()
-        
-        while (asyncio.get_event_loop().time() - start_time) < timeout:
-            await asyncio.sleep(0.5)
-            # يمكن إضافة منطق للتحقق من حالة التفويض هنا
-            # للبساطة، سنفترض أن التهيئة نجحت
-            return True
-        
-        return False
-    
-    async def _set_authentication_string(self) -> bool:
-        """تعيين سلسلة المصادقة"""
-        try:
-            auth_request = {
-                "@type": "setAuthenticationString",
-                "string": self.session_string
-            }
-            
-            await self._send_request(auth_request)
-            return True
-            
-        except Exception as e:
-            logger.error(f"خطأ في تعيين سلسلة المصادقة: {str(e)}")
-            return False
-    
-    async def _send_request(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """إرسال طلب إلى TDLib"""
-        try:
-            request_str = json.dumps(request)
-            tdjson.td_json_client_send(self.client, request_str.encode('utf-8'))
-            return None  # TDLib لا يعيد استجابة فورية
-        except Exception as e:
-            logger.error(f"خطأ في إرسال الطلب: {str(e)}")
-            return None
-    
-    async def add_chat_member(self, chat_id: int, user_id: int) -> bool:
-        """إضافة عضو إلى المجموعة"""
-        try:
-            # الحصول على معلومات المجموعة أولاً
-            get_chat_request = {
-                "@type": "getChat",
-                "chat_id": chat_id
-            }
-            
-            await self._send_request(get_chat_request)
-            
-            # إضافة العضو
-            add_member_request = {
-                "@type": "addChatMember",
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "forward_limit": 0
-            }
-            
-            await self._send_request(add_member_request)
-            
-            # انتظار قليل للتحقق من النجاح
-            await asyncio.sleep(2)
-            
-            logger.info(f"تم إرسال طلب إضافة العضو {user_id} للمجموعة {chat_id}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"خطأ في إضافة العضو: {str(e)}")
-            return False
-    
-    async def get_chat_info(self, chat_id: int) -> Optional[Dict[str, Any]]:
-        """الحصول على معلومات المجموعة"""
-        try:
-            request = {
-                "@type": "getChat",
-                "chat_id": chat_id
-            }
-            
-            await self._send_request(request)
-            return None  # سيتم معالجة الاستجابة في حلقة التحديثات
-            
-        except Exception as e:
-            logger.error(f"خطأ في الحصول على معلومات المجموعة: {str(e)}")
-            return None
-    
-    async def search_public_chat(self, username: str) -> Optional[Dict[str, Any]]:
-        """البحث عن مجموعة عامة"""
-        try:
-            request = {
-                "@type": "searchPublicChat",
-                "username": username
-            }
-            
-            await self._send_request(request)
-            return None
-            
-        except Exception as e:
-            logger.error(f"خطأ في البحث عن المجموعة العامة: {str(e)}")
-            return None
-    
-    async def close(self):
-        """إغلاق العميل"""
-        try:
-            if self.client:
-                self.is_initialized = False
-                tdjson.td_json_client_destroy(self.client)
-                self.client = None
-                logger.info("تم إغلاق عميل TDLib")
-        except Exception as e:
-            logger.error(f"خطأ في إغلاق عميل TDLib: {str(e)}")
-    
-    def __del__(self):
-        """تنظيف الموارد"""
-        if self.client:
+
+    async def _dispatcher_loop(self):
+        while not self._stop_event.is_set():
             try:
-                tdjson.td_json_client_destroy(self.client)
-            except:
-                pass
+                event = await self.event_queue.get()
+                event_type = event.get('@type')
+                extra_id = event.get('@extra')
+
+                if event_type == 'updateAuthorizationState':
+                    self.auth_state = event['authorization_state']['@type']
+                    logger.debug(f"[{self.phone}] Auth State: {self.auth_state}")
+
+                if extra_id and extra_id in self._waiters:
+                    future = self._waiters.pop(extra_id)
+                    if not future.done():
+                        future.set_result(event)
+
+                self.event_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[{self.phone}] Dispatcher error: {e}")
+
+    async def call_method(self, method: str, params: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
+        extra_id = str(uuid.uuid4())
+        params['@type'] = method
+        params['@extra'] = extra_id
+
+        future = self.loop.create_future()
+        self._waiters[extra_id] = future
+
+        query_str = json.dumps(params).encode('utf-8')
+        tdjson.td_json_client_send(self.client, query_str)
+        
+        try:
+            result = await asyncio.wait_for(future, timeout=timeout)
+            if result.get('@type') == 'error':
+                code = result.get('code')
+                message = result.get('message', '')
+                logger.error(f"[{self.phone}] Method {method} failed: {code} - {message}")
+                if code == 429:
+                    match = re.search(r'\d+', message)
+                    retry_after = int(match.group()) if match else 60
+                    self.flood_until = asyncio.get_event_loop().time() + retry_after
+                    logger.warning(f"[{self.phone}] FLOOD WAIT triggered. Locked until {datetime.fromtimestamp(self.flood_until)}")
+            return result
+        except asyncio.TimeoutError:
+            self._waiters.pop(extra_id, None)
+            logger.error(f"[{self.phone}] Method {method} timed out after {timeout}s")
+            return {'@type': 'error', 'code': 408, 'message': 'Request timeout'}
+
+    async def initialize(self) -> bool:
+        if not self._receiver_thread:
+            self.db_directory = tempfile.mkdtemp(prefix=f"tdlib_transf_{self.phone}_")
+            self._receiver_thread = threading.Thread(target=self._receive_loop, daemon=True)
+            self._receiver_thread.start()
+            self._dispatcher_task = asyncio.create_task(self._dispatcher_loop())
+
+        params = {
+            'use_test_dc': False,
+            'database_directory': self.db_directory,
+            'files_directory': self.db_directory + '/files',
+            'use_file_database': False,
+            'use_chat_info_database': False,
+            'use_message_database': True,
+            'use_secret_chats': False,
+            'api_id': API_ID,
+            'api_hash': API_HASH,
+            'system_language_code': 'en',
+            'device_model': self.device_info.get('device_model', 'SM-G998B'),
+            'system_version': self.device_info.get('system_version', 'Android 12'),
+            'application_version': self.device_info.get('app_version', '1.0.0'),
+            'enable_storage_optimizer': True,
+            'ignore_file_names': True
+        }
+        await self.call_method('setTdlibParameters', params)
+        await self.call_method('checkDatabaseEncryptionKey', {'encryption_key': ''})
+
+        self.is_initialized = True
+        logger.info(f"[{self.phone}] TDLib client initialized successfully.")
+        return True
+
+
+    async def get_chat_id_by_username(self, username: str) -> Optional[int]:
+        res = await self.call_method('searchPublicChat', {'username': username})
+        if res.get('@type') == 'chat':
+            return res.get('id')
+        return None
+
+    async def get_supergroup_full_info(self, supergroup_id: int) -> Dict[str, Any]:
+        return await self.call_method('getSupergroupFullInfo', {'supergroup_id': supergroup_id})
+
+    async def get_supergroup_members(self, supergroup_id: int, filter_type: str, offset: int, limit: int) -> Dict[str, Any]:
+        params = {
+            'supergroup_id': supergroup_id,
+            'filter': {'@type': filter_type},
+            'offset': offset,
+            'limit': limit
+        }
+        return await self.call_method('getSupergroupMembers', params)
+
+    async def add_chat_member(self, chat_id: int, user_id: int) -> Dict[str, Any]:
+        logger.info(f"[{self.phone}] Attempting to add user {user_id} to chat {chat_id}")
+        params = {
+            'chat_id': chat_id,
+            'user_id': user_id,
+            'forward_limit': 0
+        }
+        return await self.call_method('addChatMember', params)
+
+    async def close(self):
+        self._stop_event.set()
+        if self._dispatcher_task: self._dispatcher_task.cancel()
+        if self.client:
+            tdjson.td_json_client_destroy(self.client)
+            self.client = None
+        if self.db_directory and os.path.exists(self.db_directory):
+            shutil.rmtree(self.db_directory, ignore_errors=True)
+            logger.info(f"[{self.phone}] Temp directory cleaned up.")

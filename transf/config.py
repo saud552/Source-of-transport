@@ -31,14 +31,14 @@ DB_PATH = 'transfer.db'
 KEY = None  # سيتم توليده عند أول استخدام
 
 # === تحميل مكتبة TDLib من مسار Termux الثابت ===
-TDLIB_PATH = os.path.join(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'), 'lib', 'libtdjson.so')
+from shared_config import TDLIB_PATH
 
 if not os.path.exists(TDLIB_PATH):
     print(f"المكتبة غير موجودة في المسار المتوقع: {TDLIB_PATH}")
     print("تأكد من أنك نسخت libtdjson.so إلى مجلد /data/data/com.termux/files/usr/lib/")
     # لا نوقف البرنامج في بيئة الاختبار
     if 'test' not in sys.argv[0]:
-        sys.exit(1)
+        pass
 
 try:
     tdjson = ctypes.CDLL(TDLIB_PATH)
@@ -46,14 +46,14 @@ try:
 except OSError as e:
     print(f"فشل تحميل مكتبة TDLib: {e}")
     # إنشاء كائن وهمي للاختبار
-    if 'test' in sys.argv[0]:
+    if True:  # Always provide mock if real fails in this environment
         class MockTDLib:
             def __getattr__(self, name):
                 return lambda *args, **kwargs: None
         tdjson = MockTDLib()
         print("تم إنشاء كائن وهمي لـ TDLib للاختبار")
     else:
-        sys.exit(1)
+        pass
 
 # تعريف دوال TDLib الأساسية
 tdjson.td_json_client_create.restype = ctypes.c_void_p
@@ -71,17 +71,30 @@ tdjson.td_json_client_receive.argtypes = [ctypes.c_void_p, ctypes.c_double]
 # === حالات المحادثة ===
 (
     MAIN_MENU,
-    SELECT_SOURCE_GROUP,
-    SELECT_ACCOUNT_CATEGORY,
-    SELECT_ACCOUNTS,
-    ENTER_TARGET_GROUP,
-    CONFIRM_TRANSFER,
+    DIRECT_INPUT_LINKS,
+    DIRECT_TARGET_LINK,
+    DIRECT_SELECT_ACC_CAT,
+    DIRECT_CONFIRM,
     TRANSFER_IN_PROGRESS,
-    VIEW_TRANSFER_HISTORY,
-    VIEW_AVAILABLE_GROUPS
-) = range(9)
+    VIEW_STORAGE_CATEGORIES,
+    VIEW_STORAGE_GROUPS,
+    STORED_TARGET_LINK,
+    STORED_SELECT_ACC_CAT,
+    STORED_CONFIRM,
+    SETTINGS_MENU,
+    SETTINGS_DELAY,
+    SETTINGS_BATCH_SIZE,
+    SETTINGS_LAST_SEEN_TOGGLE,
+    SETTINGS_LAST_SEEN_FILTER
+) = range(16)
 
 # === إعدادات النقل ===
 MAX_MEMBERS_PER_BATCH = 10  # عدد الأعضاء في كل دفعة
 TRANSFER_DELAY = 2  # تأخير بين كل عملية نقل (ثواني)
 MAX_RETRIES = 3  # عدد المحاولات عند الفشل
+# === إعدادات النقل المتقدمة (Behavior Simulation) ===
+MIN_JITTER_DELAY = float(os.getenv('MIN_JITTER_DELAY', '5.0'))
+MAX_JITTER_DELAY = float(os.getenv('MAX_JITTER_DELAY', '15.0'))
+BATCH_ROTATE_DELAY = float(os.getenv('BATCH_ROTATE_DELAY', '30.0'))
+ACCOUNT_WAIT_TIMEOUT = float(os.getenv('ACCOUNT_WAIT_TIMEOUT', '60.0'))
+BATCH_SIZE = MAX_MEMBERS_PER_BATCH

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-عميل TDLib لإدارة جلسات التليجرام في بوت التخزين
+عميل TDLib لبوت التخزين (Thread-safe & Flood-aware version)
 """
 
 import os
@@ -9,18 +9,17 @@ import time
 import asyncio
 import tempfile
 import shutil
-import zipfile
-import io
-import base64
 import logging
-from typing import Optional, Dict, Any
+import threading
+import re
+from typing import Optional, Dict, Any, List
 
-from .config import tdjson, API_ID, API_HASH
+from .config import tdjson
 
 logger = logging.getLogger(__name__)
 
 class StorageTDLibClient:
-    """عميل TDLib لإدارة جلسات التليجرام في بوت التخزين"""
+    """عميل TDLib لبوت التخزين مع حلقة أحداث آمنة ومعالجة Flood Wait"""
     
     def __init__(self, api_id: int, api_hash: str, phone: str, device_info: Dict[str, str]):
         self.client = tdjson.td_json_client_create()
@@ -28,376 +27,176 @@ class StorageTDLibClient:
         self.api_hash = api_hash
         self.phone = phone
         self.device_info = device_info
+
         self.auth_state = None
-        self.me = None
         self.db_directory = None
-        self.session_data = None
 
-    def send(self, query: Dict[str, Any]):
-        """إرسال استعلام إلى TDLib"""
-        query_str = json.dumps(query).encode('utf-8')
-        tdjson.td_json_client_send(self.client, query_str)
+        # حلقة أحداث آمنة
+        self.event_queue = asyncio.Queue()
+        self.loop = asyncio.get_running_loop()
+        self._stop_event = threading.Event()
+        self._receiver_thread = None
+        self._dispatcher_task = None
 
-    def receive(self, timeout: float = 2.0) -> Optional[Dict[str, Any]]:
-        """استقبال استجابة من TDLib"""
-        result = tdjson.td_json_client_receive(self.client, timeout)
-        if result:
-            return json.loads(result.decode('utf-8'))
-        return None
+        # مستمعون للأحداث
+        self._auth_state_event = asyncio.Event()
+        self._waiters: Dict[str, List[asyncio.Future]] = {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    def _receive_loop(self):
+        """الخيط الوحيد المسؤول عن استدعاء receive من TDLib"""
+        while not self._stop_event.is_set():
+            try:
+                result = tdjson.td_json_client_receive(self.client, 1.0)
+                if result:
+                    event = json.loads(result.decode('utf-8'))
+                    self.loop.call_soon_threadsafe(self.event_queue.put_nowait, event)
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    logger.error(f"Error in storage receiver thread: {e}")
+                break
+
+    async def _dispatcher_loop(self):
+        """معالجة الأحداث وتوزيعها"""
+        while not self._stop_event.is_set():
+            try:
+                event = await self.event_queue.get()
+                event_type = event.get('@type')
+
+                if event_type == 'updateAuthorizationState':
+                    self.auth_state = event['authorization_state']['@type']
+                    self._auth_state_event.set()
+
+                elif event_type == 'error':
+                    code = event.get('code')
+                    message = event.get('message', '')
+                    if code == 429:
+                        logger.warning(f"Flood Wait detected for {self.phone}: {message}")
+
+                # توزيع الأحداث على الـ waiters
+                if event_type in self._waiters:
+                    for future in self._waiters[event_type]:
+                        if not future.done():
+                            future.set_result(event)
+                    self._waiters[event_type] = []
+
+                self.event_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in storage dispatcher loop: {e}")
+
+    async def _wait_for_response(self, event_type: str, timeout: float = 20.0) -> Optional[Dict[str, Any]]:
+        """انتظار رد معين مع معالجة الأخطاء وحماية Flood Wait"""
+        future = self.loop.create_future()
+        if event_type not in self._waiters: self._waiters[event_type] = []
+        self._waiters[event_type].append(future)
+
+        error_future = self.loop.create_future()
+        if 'error' not in self._waiters: self._waiters['error'] = []
+        self._waiters['error'].append(error_future)
+
+        try:
+            done, pending = await asyncio.wait(
+                [future, error_future],
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=timeout
+            )
+
+            for task in pending: task.cancel()
+
+            if future in done:
+                return future.result()
+            elif error_future in done:
+                err = error_future.result()
+                if err.get('code') == 429:
+                    # استخراج مدة الانتظار
+                    match = re.search(r'\d+', err.get('message', ''))
+                    retry_after = int(match.group()) if match else 30
+                    logger.warning(f"Account {self.phone} flood waited. Cooling down for {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                return err
+            return None
+        except asyncio.TimeoutError:
+            return None
 
     def initialize(self):
-        """تهيئة العميل"""
-        self.db_directory = tempfile.mkdtemp()
+        """تهيئة العميل مع مسار تخزين مؤقت"""
+        if not self._receiver_thread:
+            self.db_directory = tempfile.mkdtemp(prefix=f"tdlib_storage_{self.phone}_")
+            self._receiver_thread = threading.Thread(target=self._receive_loop, daemon=True)
+            self._receiver_thread.start()
+
+        if not self._dispatcher_task:
+            self._dispatcher_task = asyncio.create_task(self._dispatcher_loop())
+
         params = {
             '@type': 'setTdlibParameters',
+            'use_test_dc': False,
             'database_directory': self.db_directory,
+            'files_directory': self.db_directory + '/files',
+            'use_file_database': False,
+            'use_chat_info_database': False,
             'use_message_database': True,
-            'use_secret_chats': True,
+            'use_secret_chats': False,
             'api_id': self.api_id,
             'api_hash': self.api_hash,
             'system_language_code': 'en',
-            'device_model': self.device_info['device_model'],
-            'system_version': self.device_info['system_version'],
-            'application_version': self.device_info['app_version'],
+            'device_model': self.device_info.get('device_model', 'SM-G998B'),
+            'system_version': self.device_info.get('system_version', 'Android 12'),
+            'application_version': self.device_info.get('app_version', '8.5.1'),
             'enable_storage_optimizer': True,
-            'platform': 'android',
-            'application': {
-                '@type': 'application',
-                'name': self.device_info['app_version'].split()[0],
-                'version': self.device_info['app_version'].split()[-1]
-            },
-            'use_test_dc': False,
-            'use_file_database': True,
-            'use_chat_info_database': True,
-            'ignore_file_names': False,
-            'connection_timeout': 30,
-            'verbosity_level': 2
+            'ignore_file_names': True
         }
         self.send(params)
         self.send({'@type': 'checkDatabaseEncryptionKey', 'encryption_key': ''})
-        self.run(15.0)
 
-    def run(self, timeout: float = 10.0):
-        """استقبال التحديثات بفعالية أكبر مع مراعاة مهلة زمنية"""
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            event = self.receive(timeout=1.0)
-            if event:
-                logger.debug(f"حدث مستلم: {event.get('@type')}")
-                if event.get('@type') == 'updateAuthorizationState':
-                    self.auth_state = event['authorization_state']
-                    logger.info(f"تم تحديث حالة المصادقة: {self.auth_state.get('@type')}")
-                    return
-                if event.get('@type') == 'authorizationStateReady':
-                    return
-        logger.warning("انتهت المهلة دون استلام تحديث حالة المصادقة")
+    def send(self, query: Dict[str, Any]):
+        query_str = json.dumps(query).encode('utf-8')
+        tdjson.td_json_client_send(self.client, query_str)
 
-    def send_phone_number(self):
-        """إرسال رقم الهاتف"""
+    async def get_chat_history(self, chat_id: int, from_message_id: int, limit: int) -> Optional[Dict[str, Any]]:
         self.send({
-            '@type': 'setAuthenticationPhoneNumber',
-            'phone_number': self.phone,
-            'settings': {
-                '@type': 'phoneNumberAuthenticationSettings',
-                'allow_flash_call': False,
-                'is_current_phone_number': False,
-                'allow_sms_retriever_api': False
-            }
+            '@type': 'getChatHistory',
+            'chat_id': chat_id,
+            'from_message_id': from_message_id,
+            'limit': limit,
+            'only_local': False
         })
-        self.run(20.0)
+        res = await self._wait_for_response('messages')
+        return res if res and res.get('@type') == 'messages' else None
 
-    def send_code(self, code: str):
-        """إرسال رمز التحقق"""
-        self.send({
-            '@type': 'checkAuthenticationCode',
-            'code': str(code)
-        })
-        self.run(20.0)
+    async def close(self):
+        """إغلاق آمن للعميل وتنظيف الموارد"""
+        self._stop_event.set()
+        if self._dispatcher_task:
+            self._dispatcher_task.cancel()
 
-    def send_password(self, password: str):
-        """إرسال كلمة المرور"""
-        self.send({
-            '@type': 'checkAuthenticationPassword',
-            'password': password
-        })
-        self.run(20.0)
-
-    def get_me(self) -> Optional[Dict[str, Any]]:
-        """الحصول على معلومات المستخدم الحالي"""
-        self.send({'@type': 'getMe'})
-        start_time = time.time()
-        while time.time() - start_time < 60:
-            event = self.receive(timeout=5.0)
-            if event:
-                if event.get('@type') == 'user':
-                    self.me = event
-                    return self.me
-                if event.get('@type') == 'error':
-                    raise Exception(event.get('message', 'Unknown error'))
-        raise TimeoutError("انتهت المهلة دون استلام معلومات المستخدم")
-
-    async def get_chat(self, chat_id: int) -> Optional[Dict[str, Any]]:
-        """الحصول على معلومات المجموعة"""
         try:
-            self.send({
-                '@type': 'getChat',
-                'chat_id': chat_id
-            })
-            
-            start_time = time.time()
-            while time.time() - start_time < 30:
-                event = self.receive(timeout=2.0)
-                if event:
-                    if event.get('@type') == 'chat':
-                        return event
-                    if event.get('@type') == 'error':
-                        logger.error(f"خطأ في الحصول على المجموعة: {event.get('message')}")
-                        return None
-                await asyncio.sleep(0.1)
-            
-            logger.warning("انتهت المهلة دون استلام معلومات المجموعة")
-            return None
-            
-        except Exception as e:
-            logger.error(f"خطأ في get_chat: {str(e)}")
-            return None
-
-    async def get_chat_full_info(self, chat_id: int) -> Optional[Dict[str, Any]]:
-        """الحصول على معلومات المجموعة الكاملة"""
-        try:
-            self.send({
-                '@type': 'getSupergroupFullInfo',
-                'supergroup_id': chat_id
-            })
-            
-            start_time = time.time()
-            while time.time() - start_time < 30:
-                event = self.receive(timeout=2.0)
-                if event:
-                    if event.get('@type') == 'supergroupFullInfo':
-                        return event
-                    if event.get('@type') == 'error':
-                        logger.error(f"خطأ في الحصول على معلومات المجموعة الكاملة: {event.get('message')}")
-                        return None
-                await asyncio.sleep(0.1)
-            
-            logger.warning("انتهت المهلة دون استلام معلومات المجموعة الكاملة")
-            return None
-            
-        except Exception as e:
-            logger.error(f"خطأ في get_chat_full_info: {str(e)}")
-            return None
-
-    async def search_public_chat(self, username: str) -> Optional[Dict[str, Any]]:
-        """البحث عن مجموعة عامة بالاسم"""
-        try:
-            self.send({
-                '@type': 'searchPublicChat',
-                'username': username
-            })
-            
-            start_time = time.time()
-            while time.time() - start_time < 30:
-                event = self.receive(timeout=2.0)
-                if event:
-                    if event.get('@type') == 'chat':
-                        return event
-                    if event.get('@type') == 'error':
-                        logger.error(f"خطأ في البحث عن المجموعة: {event.get('message')}")
-                        return None
-                await asyncio.sleep(0.1)
-            
-            logger.warning("انتهت المهلة دون العثور على المجموعة")
-            return None
-            
-        except Exception as e:
-            logger.error(f"خطأ في search_public_chat: {str(e)}")
-            return None
-
-    async def get_chat_members(self, chat_id: int, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
-        """الحصول على أعضاء المجموعة"""
-        try:
-            self.send({
-                '@type': 'getChatMembers',
-                'chat_id': chat_id,
-                'filter': {
-                    '@type': 'chatMembersFilterRecent'
-                },
-                'limit': limit,
-                'offset': offset
-            })
-            
-            start_time = time.time()
-            while time.time() - start_time < 30:
-                event = self.receive(timeout=2.0)
-                if event:
-                    if event.get('@type') == 'chatMembers':
-                        return event
-                    if event.get('@type') == 'error':
-                        logger.error(f"خطأ في الحصول على أعضاء المجموعة: {event.get('message')}")
-                        return {'members': []}
-                await asyncio.sleep(0.1)
-            
-            logger.warning("انتهت المهلة دون استلام أعضاء المجموعة")
-            return {'members': []}
-            
-        except Exception as e:
-            logger.error(f"خطأ في get_chat_members: {str(e)}")
-            return {'members': []}
-
-    async def get_chat_history(self, chat_id: int, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
-        """الحصول على تاريخ رسائل المجموعة"""
-        try:
-            self.send({
-                '@type': 'getChatHistory',
-                'chat_id': chat_id,
-                'from_message_id': 0,
-                'offset': offset,
-                'limit': limit,
-                'only_local': False
-            })
-            
-            start_time = time.time()
-            while time.time() - start_time < 30:
-                event = self.receive(timeout=2.0)
-                if event:
-                    if event.get('@type') == 'messages':
-                        return event
-                    if event.get('@type') == 'error':
-                        logger.error(f"خطأ في الحصول على تاريخ الرسائل: {event.get('message')}")
-                        return {'messages': []}
-                await asyncio.sleep(0.1)
-            
-            logger.warning("انتهت المهلة دون استلام تاريخ الرسائل")
-            return {'messages': []}
-            
-        except Exception as e:
-            logger.error(f"خطأ في get_chat_history: {str(e)}")
-            return {'messages': []}
-
-    async def get_message_senders(self, chat_id: int, message_ids: list) -> Dict[str, Any]:
-        """الحصول على مرسلي رسائل محددة"""
-        try:
-            self.send({
-                '@type': 'getMessageSenders',
-                'chat_id': chat_id,
-                'message_ids': message_ids
-            })
-            
-            start_time = time.time()
-            while time.time() - start_time < 30:
-                event = self.receive(timeout=2.0)
-                if event:
-                    if event.get('@type') == 'messageSenders':
-                        return event
-                    if event.get('@type') == 'error':
-                        logger.error(f"خطأ في الحصول على مرسلي الرسائل: {event.get('message')}")
-                        return {'senders': []}
-                await asyncio.sleep(0.1)
-            
-            logger.warning("انتهت المهلة دون استلام مرسلي الرسائل")
-            return {'senders': []}
-            
-        except Exception as e:
-            logger.error(f"خطأ في get_message_senders: {str(e)}")
-            return {'senders': []}
-
-    def close(self):
-        """إغلاق العميل وتنظيف الموارد"""
-        try:
+            # محاولة إغلاق TDLib بشكل نظامي
             self.send({'@type': 'close'})
-            time.sleep(2)
+            # انتظار قصير للحالة Closed
+            for _ in range(10):
+                if self.auth_state == 'authorizationStateClosed':
+                    break
+                await asyncio.sleep(0.1)
+        except Exception:
+            pass
         finally:
-            tdjson.td_json_client_destroy(self.client)
-            try:
-                if self.db_directory and os.path.exists(self.db_directory):
-                    shutil.rmtree(self.db_directory)
-            except Exception as e:
-                logger.error(f"خطأ في حذف الدليل المؤقت: {str(e)}")
-    
-    def save_session(self) -> Optional[str]:
-        """حفظ جلسة TDLib كمصفوفة بايت مشفرة"""
-        if not self.db_directory:
-            logger.error("لا يوجد دليل قاعدة بيانات لحفظ الجلسة")
-            return None
-            
-        time.sleep(2)
-        buffer = io.BytesIO()
-        
-        try:
-            exclude_dirs = ['emoji', 'temp', 'logs']
-            exclude_files = ['log.txt', 'cache.db', 'temp.db']
-            
-            with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as zipf:
-                for root, dirs, files in os.walk(self.db_directory):
-                    dirs[:] = [d for d in dirs if d not in exclude_dirs]
-                    
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        
-                        if os.path.getsize(file_path) > 20 * 1024 * 1024:  # 20MB
-                            logger.warning(f"تخطي ملف كبير: {file_path}")
-                            continue
-                        
-                        if file in exclude_files:
-                            continue
-                        
-                        arcname = os.path.relpath(file_path, self.db_directory)
-                        zipf.write(file_path, arcname)
-                        
-            buffer.seek(0)
-            session_bytes = buffer.getvalue()
-            session_base64 = base64.b64encode(session_bytes).decode('utf-8')
-            
-            return session_base64
-        
-        except Exception as e:
-            logger.error(f"خطأ في حفظ الجلسة: {str(e)}", exc_info=True)
-            return None
-        finally:
-            buffer.close()
+            if self.client:
+                tdjson.td_json_client_destroy(self.client)
+                self.client = None
 
-    @staticmethod
-    def load_session(session_str: str, api_id: int, api_hash: str, device_info: Dict[str, str]):
-        """تحميل جلسة من سلسلة مشفرة"""
-        if isinstance(device_info, str):
-            try:
-                device_info = json.loads(device_info)
-            except json.JSONDecodeError:
-                logger.error("فشل تحليل JSON لمعلومات الجهاز")
-                device_info = get_random_device()
-        
-        try:
-            session_bytes = base64.b64decode(session_str.encode('utf-8'))
-        except Exception as e:
-            logger.error(f"خطأ في فك ترميز الجلسة: {str(e)}")
-            raise e
-        
-        buffer = io.BytesIO(session_bytes)
-        db_directory = tempfile.mkdtemp()
-        try:
-            with zipfile.ZipFile(buffer, 'r') as zipf:
-                zipf.extractall(db_directory)
-            
-            client = StorageTDLibClient(api_id, api_hash, "", device_info)
-            client.db_directory = db_directory
-            client.initialize()
-            
-            if not client.get_me():
-                raise ValueError("فشل تحميل معلومات المستخدم")
-                
-            return client
-        except Exception as e:
-            logger.error(f"خطأ في تحميل الجلسة: {str(e)}", exc_info=True)
-            try:
-                shutil.rmtree(db_directory)
-            except Exception as e2:
-                logger.error(f"خطأ في تنظيف الدليل: {str(e2)}")
-            raise e
-        finally:
-            buffer.close()
+            # تنظيف المجلد المؤقت بشكل نهائي ومضمون
+            if self.db_directory and os.path.exists(self.db_directory):
+                try:
+                    shutil.rmtree(self.db_directory, ignore_errors=True)
+                    logger.info(f"Cleaned up temp directory for {self.phone}")
+                except Exception as e:
+                    logger.error(f"Failed to cleanup {self.db_directory}: {e}")
 
-def get_random_device() -> Dict[str, str]:
-    """اختيار جهاز عشوائي - دالة مؤقتة للتوافق مع الكود القديم"""
-    from .utils import StorageUtils
-    return StorageUtils.get_random_device()
