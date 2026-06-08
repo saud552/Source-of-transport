@@ -1,420 +1,298 @@
 # -*- coding: utf-8 -*-
-"""
-معالجات بوت النقل
-"""
-
-import logging
 import asyncio
-from typing import Dict, Any, List
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler
-from telegram.constants import ParseMode
+import logging
+from telegram import Update, ReplyKeyboardRemove
+from telegram.ext import ContextTypes
+import uuid
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from transf.config import (
-    MAIN_MENU, SELECT_SOURCE_GROUP, SELECT_ACCOUNT_CATEGORY, SELECT_ACCOUNTS,
-    ENTER_TARGET_GROUP, CONFIRM_TRANSFER, TRANSFER_IN_PROGRESS,
-    VIEW_TRANSFER_HISTORY, VIEW_AVAILABLE_GROUPS, MAX_MEMBERS_PER_BATCH
-)
-from transf.database import TransferDatabaseManager
-from transf.transfer_manager import TransferManager
-from transf.keyboards import TransferKeyboards
-from transf.utils import TransferUtils
+from .decorators import owner_only
+from .keyboards import TransferKeyboards
+from .transfer_manager import TransferManager
+from .database import TransferDatabaseManager
 
 logger = logging.getLogger(__name__)
 
 class TransferHandlers:
-    """معالجات بوت النقل"""
-    
     def __init__(self, db_manager: TransferDatabaseManager):
         self.db_manager = db_manager
         self.transfer_manager = TransferManager(db_manager)
-        self.keyboards = TransferKeyboards()
-        self.utils = TransferUtils()
-        self.current_transfer = None
-    
+        self.kb = TransferKeyboards()
+
+    @owner_only
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """بدء البوت"""
-        user_id = update.effective_user.id
-        
-        # التحقق من صلاحيات المدير
-        if not self.utils.is_admin(user_id):
-            await update.message.reply_text("❌ عذراً، هذا البوت مخصص للمديرين فقط.")
-            return ConversationHandler.END
-        
-        welcome_text = """
-🤖 **بوت نقل الأعضاء**
+        msg = "👋 مرحباً بك في نظام نقل أعضاء التليجرام\nاختر أحد الخيارات:"
+        keyboard = self.kb.main_menu()
+        if update.callback_query:
+            await update.callback_query.message.edit_text(msg, reply_markup=keyboard)
+        else:
+            await update.message.reply_text(msg, reply_markup=keyboard)
+        return 0 # MAIN_MENU
 
-مرحباً بك في بوت نقل الأعضاء! يمكنك استخدام هذا البوت لنقل الأعضاء من المجموعات المخزنة مسبقاً إلى مجموعات جديدة.
-
-**الوظائف المتاحة:**
-• 📤 نقل الأعضاء من المجموعات المخزنة
-• 📊 عرض تاريخ عمليات النقل
-• 📋 عرض المجموعات المتاحة للنقل
-• ⚙️ إدارة عمليات النقل
-
-اختر الوظيفة المطلوبة:
-        """
-        
-        keyboard = self.keyboards.main_menu()
-        await update.message.reply_text(
-            welcome_text,
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return MAIN_MENU
-    
+    @owner_only
     async def main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """القائمة الرئيسية"""
         query = update.callback_query
         await query.answer()
+        data = query.data
         
-        if query.data == "start_transfer":
-            return await self.start_transfer_flow(update, context)
-        elif query.data == "view_history":
-            return await self.view_transfer_history(update, context)
-        elif query.data == "view_groups":
-            return await self.view_available_groups(update, context)
-        elif query.data == "cancel":
-            await query.edit_message_text("تم إلغاء العملية.")
-            return ConversationHandler.END
+        if data == "transfer_direct":
+            await query.edit_message_text("📥 أرسل روابط المجموعات المصدر (كل رابط في سطر منفصل):")
+            return 1 # DIRECT_INPUT_LINKS
+        elif data == "transfer_view_storage":
+            cats = await self.db_manager.get_storage_categories()
+            if not cats:
+                await query.edit_message_text("❌ لا توجد فئات تخزين.", reply_markup=self.kb.main_menu())
+                return 0
+            # Reuse account cat keyboard visually
+            kb = self.kb.account_categories_keyboard(cats)
+            await query.edit_message_text("📂 اختر فئة לעرض المجموعات المخزنة:", reply_markup=kb)
+            return 6 # VIEW_STORAGE_CATEGORIES
+        elif data == "transfer_settings":
+            kb = self.kb.settings_menu()
+            await query.edit_message_text("⚙️ **إعدادات النقل**\n\nاختر القسم لتعديله:", reply_markup=kb, parse_mode="Markdown")
+            return 11 # SETTINGS_MENU
+        elif data == "cancel":
+            return await self.cancel_operation(update, context)
+        return 0
+
+    # ----- Direct Transfer Flow -----
+    @owner_only
+    async def direct_input_links(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        text = update.message.text.strip()
+        links = [line.strip() for line in text.split('\n') if line.strip()]
+        if not links:
+            await update.message.reply_text("❌ لم يتم التعرف على روابط صالحة.")
+            return 1
+        context.user_data['direct_links'] = links
+        await update.message.reply_text("📥 أرسل رابط/معرف المجموعة الهدف:")
+        return 2 # DIRECT_TARGET_LINK
+
+    @owner_only
+    async def direct_target_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        text = update.message.text.strip()
+        # Resolve username simple
+        target_group = text.split("/")[-1].replace("@", "")
+        # Real logic would resolve this to an ID. We assume string for now or basic mock.
+        context.user_data['direct_target'] = target_group
         
-        return MAIN_MENU
-    
-    async def start_transfer_flow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """بدء عملية النقل"""
+        cats = await self.db_manager.get_account_categories()
+        if not cats:
+            await update.message.reply_text("❌ لا توجد فئات حسابات.")
+            return await self.start(update, context)
+        kb = self.kb.account_categories_keyboard(cats)
+        await update.message.reply_text("👤 اختر فئة الحسابات للنقل:", reply_markup=kb)
+        return 3 # DIRECT_SELECT_ACC_CAT
+
+    @owner_only
+    async def direct_select_acc_cat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         query = update.callback_query
         await query.answer()
+        if query.data == "back": return await self.start(update, context)
         
-        # الحصول على المجموعات المتاحة
-        groups = await self.db_manager.get_available_source_groups()
-        
-        if not groups:
-            await query.edit_message_text(
-                "❌ لا توجد مجموعات مخزنة متاحة للنقل.\n\nتأكد من أنك قمت بتخزين أعضاء من مجموعات مسبقاً."
-            )
-            return MAIN_MENU
-        
-        keyboard = self.keyboards.source_groups_keyboard(groups)
-        await query.edit_message_text(
-            "📤 **اختر المجموعة المصدر:**\n\n"
-            "اختر المجموعة التي تريد نقل الأعضاء منها:",
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return SELECT_SOURCE_GROUP
-    
-    async def select_source_group(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """اختيار المجموعة المصدر"""
-        query = update.callback_query
-        await query.answer()
-        
-        if query.data == "back":
-            return await self.main_menu(update, context)
-        
-        # استخراج معرف المجموعة
-        group_id = int(query.data.split("_")[1])
-        
-        # حفظ معرف المجموعة في السياق
-        context.user_data['source_group_id'] = group_id
-        
-        # الحصول على معلومات المجموعة
-        groups = await self.db_manager.get_available_source_groups()
-        selected_group = next((g for g in groups if g['group_id'] == group_id), None)
-        
-        if not selected_group:
-            await query.edit_message_text("❌ المجموعة المحددة غير موجودة.")
-            return MAIN_MENU
-        
-        # حفظ معلومات المجموعة
-        context.user_data['source_group_info'] = selected_group
-        
-        # الحصول على فئات الحسابات
-        categories = await self.db_manager.get_account_categories()
-        
-        if not categories:
-            await query.edit_message_text(
-                "❌ لا توجد حسابات متاحة للنقل.\n\nتأكد من أنك قمت بتسجيل حسابات مسبقاً."
-            )
-            return MAIN_MENU
-        
-        keyboard = self.keyboards.account_categories_keyboard(categories)
-        await query.edit_message_text(
-            f"📱 **اختر فئة الحسابات:**\n\n"
-            f"**المجموعة المصدر:** {selected_group['title']}\n"
-            f"**عدد الأعضاء المخزنين:** {selected_group['stored_members_count']}\n\n"
-            f"اختر فئة الحسابات التي تريد استخدامها للنقل:",
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return SELECT_ACCOUNT_CATEGORY
-    
-    async def select_account_category(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """اختيار فئة الحسابات"""
-        query = update.callback_query
-        await query.answer()
-        
-        if query.data == "back":
-            return await self.start_transfer_flow(update, context)
-        
-        # استخراج معرف الفئة
-        category_id = query.data.split("_")[1]
-        
-        # حفظ معرف الفئة في السياق
-        context.user_data['account_category_id'] = category_id
-        
-        # الحصول على حسابات الفئة
-        accounts = await self.db_manager.get_accounts_by_category(category_id)
-        
+        cat_id = query.data.split("_")[1]
+        accounts = await self.db_manager.get_accounts_by_category(cat_id)
         if not accounts:
-            await query.edit_message_text(
-                "❌ لا توجد حسابات متاحة في هذه الفئة."
-            )
-            return SELECT_ACCOUNT_CATEGORY
-        
-        # حفظ الحسابات في السياق
-        context.user_data['selected_accounts'] = accounts
-        
-        keyboard = self.keyboards.confirm_accounts_keyboard(accounts)
-        await query.edit_message_text(
-            f"✅ **تأكيد الحسابات المختارة:**\n\n"
-            f"تم العثور على {len(accounts)} حساب في هذه الفئة.\n\n"
-            f"هل تريد المتابعة مع هذه الحسابات؟",
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return SELECT_ACCOUNTS
-    
-    async def select_accounts(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """تأكيد الحسابات المختارة"""
+            await query.edit_message_text("❌ الفئة لا تحتوي على حسابات نشطة.")
+            return await self.start(update, context)
+
+        context.user_data['direct_accounts'] = accounts
+        kb = self.kb.confirm_transfer_keyboard()
+        await query.edit_message_text("✅ تم اختيار الحسابات بنجاح.\nهل أنت متأكد من بدء عملية النقل المباشر؟", reply_markup=kb)
+        return 4 # DIRECT_CONFIRM
+
+    @owner_only
+    async def direct_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         query = update.callback_query
         await query.answer()
+        if query.data == "back": return await self.start(update, context)
         
-        if query.data == "back":
-            return await self.select_source_group(update, context)
-        elif query.data == "confirm_accounts":
-            await query.edit_message_text(
-                "📝 **أدخل رابط أو معرف المجموعة الهدف:**\n\n"
-                "أرسل رابط المجموعة أو معرفها (مثل: @groupname أو https://t.me/groupname):",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return ENTER_TARGET_GROUP
+        links = context.user_data['direct_links']
+        accounts = context.user_data['direct_accounts']
+        target = context.user_data['direct_target']
         
-        return SELECT_ACCOUNTS
-    
-    async def enter_target_group(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """إدخال المجموعة الهدف"""
-        if update.message.text.lower() in ['/cancel', 'إلغاء']:
-            await update.message.reply_text("تم إلغاء العملية.")
-            return ConversationHandler.END
-        
-        target_group_input = update.message.text.strip()
-        
-        # استخراج معرف المجموعة من الرابط
-        target_group_id, target_group_title = self.utils.extract_group_info(target_group_input)
-        
-        if not target_group_id:
-            await update.message.reply_text(
-                "❌ رابط المجموعة غير صحيح.\n\n"
-                "تأكد من أن الرابط صحيح (مثل: @groupname أو https://t.me/groupname)"
-            )
-            return ENTER_TARGET_GROUP
-        
-        # حفظ معلومات المجموعة الهدف
-        context.user_data['target_group_id'] = target_group_id
-        context.user_data['target_group_title'] = target_group_title
-        
-        # الحصول على معلومات المجموعة المصدر
-        source_group_info = context.user_data.get('source_group_info', {})
-        selected_accounts = context.user_data.get('selected_accounts', [])
-        
-        # عرض تأكيد العملية
-        keyboard = self.keyboards.confirm_transfer_keyboard()
-        await update.message.reply_text(
-            f"📋 **تأكيد عملية النقل:**\n\n"
-            f"**المجموعة المصدر:** {source_group_info.get('title', 'غير محدد')}\n"
-            f"**المجموعة الهدف:** {target_group_title}\n"
-            f"**عدد الحسابات:** {len(selected_accounts)}\n"
-            f"**عدد الأعضاء المتوقع:** {source_group_info.get('stored_members_count', 0)}\n\n"
-            f"هل تريد المتابعة مع هذه الإعدادات؟",
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return CONFIRM_TRANSFER
-    
-    async def confirm_transfer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """تأكيد عملية النقل"""
+        # Call direct transfer (Need resolved integer target id usually, assuming 0 for now in this mock path)
+        await self.transfer_manager.start_direct_transfer(target, links, accounts, update, context)
+        return 5 # TRANSFER_IN_PROGRESS
+
+    # ----- Stored Transfer Flow -----
+    @owner_only
+    async def view_storage_categories(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         query = update.callback_query
         await query.answer()
+        if query.data == "back": return await self.start(update, context)
         
-        if query.data == "back":
-            await query.edit_message_text(
-                "📝 **أدخل رابط أو معرف المجموعة الهدف:**\n\n"
-                "أرسل رابط المجموعة أو معرفها (مثل: @groupname أو https://t.me/groupname):",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return ENTER_TARGET_GROUP
-        elif query.data == "start_transfer":
-            return await self.start_transfer_process(update, context)
-        
-        return CONFIRM_TRANSFER
-    
-    async def start_transfer_process(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """بدء عملية النقل الفعلية"""
-        query = update.callback_query
-        await query.answer()
-        
-        # الحصول على البيانات المحفوظة
-        source_group_info = context.user_data.get('source_group_info', {})
-        target_group_id = context.user_data.get('target_group_id')
-        target_group_title = context.user_data.get('target_group_title')
-        selected_accounts = context.user_data.get('selected_accounts', [])
-        account_category_id = context.user_data.get('account_category_id')
-        
-        # إنشاء عملية النقل
-        transfer_id = await self.db_manager.create_transfer_operation(
-            source_group_id=source_group_info['group_id'],
-            source_group_title=source_group_info['title'],
-            target_group_id=target_group_id,
-            target_group_title=target_group_title,
-            account_category=account_category_id
-        )
-        
-        # الحصول على الأعضاء المخزنين
-        stored_members = await self.db_manager.get_stored_members_for_group(source_group_info['group_id'])
-        
-        if not stored_members:
-            await query.edit_message_text(
-                "❌ لا توجد أعضاء مخزنين في هذه المجموعة."
-            )
-            return MAIN_MENU
-        
-        # إضافة تفاصيل النقل
-        await self.db_manager.add_transfer_details(transfer_id, stored_members)
-        
-        # تحديث إحصائيات العملية
-        await self.db_manager.update_transfer_operation(
-            transfer_id,
-            total_members=len(stored_members),
-            status='running',
-            started_at=context.bot_data.get('current_time', 'now')
-        )
-        
-        # بدء عملية النقل
-        keyboard = self.keyboards.transfer_control_keyboard()
-        await query.edit_message_text(
-            f"🚀 **بدء عملية النقل...**\n\n"
-            f"**المجموعة المصدر:** {source_group_info['title']}\n"
-            f"**المجموعة الهدف:** {target_group_title}\n"
-            f"**عدد الأعضاء:** {len(stored_members)}\n"
-            f"**عدد الحسابات:** {len(selected_accounts)}\n\n"
-            f"⏳ جاري النقل...",
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        # تشغيل عملية النقل في الخلفية
-        asyncio.create_task(self.transfer_manager.start_transfer(
-            transfer_id, stored_members, selected_accounts, update, context
-        ))
-        
-        return TRANSFER_IN_PROGRESS
-    
-    async def view_transfer_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """عرض تاريخ عمليات النقل"""
-        query = update.callback_query
-        await query.answer()
-        
-        operations = await self.db_manager.get_transfer_operations(limit=10)
-        
-        if not operations:
-            await query.edit_message_text(
-                "📊 **تاريخ عمليات النقل:**\n\nلا توجد عمليات نقل سابقة.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return MAIN_MENU
-        
-        text = "📊 **تاريخ عمليات النقل:**\n\n"
-        for i, op in enumerate(operations, 1):
-            status_emoji = {
-                'completed': '✅',
-                'running': '🔄',
-                'failed': '❌',
-                'paused': '⏸️',
-                'pending': '⏳'
-            }.get(op['status'], '❓')
-            
-            text += f"{i}. {status_emoji} **{op['source_group_title']}** → **{op['target_group_title']}**\n"
-            text += f"   📊 {op['transferred_members']}/{op['total_members']} أعضاء\n"
-            text += f"   📅 {op['created_at']}\n\n"
-        
-        keyboard = self.keyboards.back_to_main_keyboard()
-        await query.edit_message_text(
-            text,
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return MAIN_MENU
-    
-    async def view_available_groups(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """عرض المجموعات المتاحة للنقل"""
-        query = update.callback_query
-        await query.answer()
-        
-        groups = await self.db_manager.get_available_source_groups()
-        
+        cat_id = query.data.split("_")[1]
+        groups = await self.db_manager.get_groups_by_category(cat_id)
         if not groups:
-            await query.edit_message_text(
-                "📋 **المجموعات المتاحة للنقل:**\n\nلا توجد مجموعات مخزنة متاحة للنقل.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return MAIN_MENU
-        
-        text = "📋 **المجموعات المتاحة للنقل:**\n\n"
-        for i, group in enumerate(groups, 1):
-            text += f"{i}. **{group['title']}**\n"
-            text += f"   👥 {group['stored_members_count']} عضو مخزن\n"
-            if group.get('username'):
-                text += f"   🔗 @{group['username']}\n"
-            text += "\n"
-        
-        keyboard = self.keyboards.back_to_main_keyboard()
-        await query.edit_message_text(
-            text,
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return MAIN_MENU
-    
-    async def handle_transfer_control(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """معالجة أزرار التحكم في النقل"""
+            await query.edit_message_text("❌ لا توجد مجموعات مخزنة هنا.")
+            return await self.start(update, context)
+
+        # Simplified keyboard for demo
+        kb = self.kb.source_groups_keyboard([{'title': g['title'], 'stored_members_count': g['member_count'], 'group_id': g['id']} for g in groups])
+        await query.edit_message_text("📁 اختر المجموعة المخزنة:", reply_markup=kb)
+        return 7 # VIEW_STORAGE_GROUPS
+
+    @owner_only
+    async def view_storage_groups(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         query = update.callback_query
         await query.answer()
+        if query.data == "back": return await self.start(update, context)
         
-        if query.data == "pause_transfer":
-            # إيقاف النقل مؤقتاً
-            await query.edit_message_text("⏸️ تم إيقاف النقل مؤقتاً.")
-        elif query.data == "resume_transfer":
-            # استئناف النقل
-            await query.edit_message_text("🔄 تم استئناف النقل.")
-        elif query.data == "cancel_transfer":
-            # إلغاء النقل
-            await query.edit_message_text("❌ تم إلغاء النقل.")
-            return MAIN_MENU
+        group_id = query.data.split("_")[1]
+        context.user_data['stored_group_id'] = group_id
         
-        return TRANSFER_IN_PROGRESS
-    
+        kb = self.kb.stored_group_action_keyboard(group_id, "dummy")
+        await query.edit_message_text("⚙️ **خيارات النقل للمجموعة:**", reply_markup=kb, parse_mode="Markdown")
+        # Reuse same state, we just catch the actions
+        return 7
+        
+    @owner_only
+    async def handle_stored_actions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+        if data.startswith("t_back_"): return await self.start(update, context)
+        
+        if data.startswith("t_new_"):
+            context.user_data['transfer_mode'] = 'new'
+            await self.db_manager.reset_stored_members_status(data.split("_")[2])
+        elif data.startswith("t_resume_"):
+            context.user_data['transfer_mode'] = 'resume'
+        elif data.startswith("t_retry_"):
+            context.user_data['transfer_mode'] = 'retry'
+
+        await query.edit_message_text("📥 أرسل رابط/معرف المجموعة الهدف:")
+        return 8 # STORED_TARGET_LINK
+
+    @owner_only
+    async def stored_target_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        target = update.message.text.strip().split("/")[-1].replace("@", "")
+        context.user_data['stored_target'] = target
+        
+        cats = await self.db_manager.get_account_categories()
+        kb = self.kb.account_categories_keyboard(cats)
+        await update.message.reply_text("👤 اختر فئة الحسابات للنقل:", reply_markup=kb)
+        return 9 # STORED_SELECT_ACC_CAT
+
+    @owner_only
+    async def stored_select_acc_cat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        query = update.callback_query
+        await query.answer()
+        if query.data == "back": return await self.start(update, context)
+        
+        cat_id = query.data.split("_")[1]
+        accounts = await self.db_manager.get_accounts_by_category(cat_id)
+        context.user_data['stored_accounts'] = accounts
+        
+        kb = self.kb.confirm_transfer_keyboard()
+        await query.edit_message_text("✅ تم التأكيد. بدء عملية النقل؟", reply_markup=kb)
+        return 10 # STORED_CONFIRM
+
+    @owner_only
+    async def stored_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        query = update.callback_query
+        await query.answer()
+        if query.data == "back": return await self.start(update, context)
+        
+        group_id = context.user_data['stored_group_id']
+        accounts = context.user_data['stored_accounts']
+        target = context.user_data['stored_target']
+        mode = context.user_data['transfer_mode']
+        
+        status_filter = 'pending' if mode == 'resume' else 'success' if mode == 'retry' else None
+        members = await self.db_manager.get_stored_members_by_status(group_id, status_filter)
+        
+        if not members:
+            await query.edit_message_text("❌ لا يوجد أعضاء لنقلهم بهذه الحالة.")
+            return await self.start(update, context)
+            
+        transfer_id = str(uuid.uuid4())
+        await self.transfer_manager.start_stored_transfer(transfer_id, group_id, target, members, accounts, update, context)
+        return 5 # TRANSFER_IN_PROGRESS
+
+    # ----- Settings Flow -----
+    @owner_only
+    async def settings_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+        if data == "back_to_main": return await self.start(update, context)
+        
+        if data == "set_delay":
+            await query.edit_message_text("⏱️ أرسل الفاصل الزمني (أدنى، أقصى) مفصولاً بفاصلة. مثال: `2,5`")
+            return 12 # SETTINGS_DELAY
+        elif data == "set_batch_size":
+            await query.edit_message_text("🔄 أرسل عدد الإضافات لكل حساب قبل التبديل:")
+            return 13 # SETTINGS_BATCH_SIZE
+        elif data == "set_ls_filter":
+            kb = self.kb.last_seen_settings_keyboard()
+            await query.edit_message_text("⏳ اختر فلتر آخر ظهور المطلوب:", reply_markup=kb)
+            return 15 # SETTINGS_LAST_SEEN_FILTER
+        return 11
+
+    @owner_only
+    async def settings_delay_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        text = update.message.text.strip()
+        try:
+            min_d, max_d = map(int, text.split(","))
+            await self.db_manager.set_setting('delay_min', str(min_d))
+            await self.db_manager.set_setting('delay_max', str(max_d))
+            await update.message.reply_text("✅ تم تحديث الفاصل الزمني.", reply_markup=self.kb.settings_menu())
+        except:
+            await update.message.reply_text("❌ صيغة خاطئة. مثال: 2,5")
+            return 12
+        return 11
+
+    @owner_only
+    async def settings_batch_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        text = update.message.text.strip()
+        if text.isdigit():
+            await self.db_manager.set_setting('batch_size', text)
+            await update.message.reply_text("✅ تم تحديث عدد الإضافات.", reply_markup=self.kb.settings_menu())
+            return 11
+        await update.message.reply_text("❌ يرجى إرسال أرقام فقط.")
+        return 13
+
+    @owner_only
+    async def settings_ls_filter(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+        if data == "transfer_settings":
+            await query.edit_message_text("⚙️ **إعدادات النقل**\n\nاختر القسم لتعديله:", reply_markup=self.kb.settings_menu(), parse_mode="Markdown")
+            return 11
+
+        if data.startswith("tls_"):
+            await self.db_manager.set_setting('ls_filter', data.split("_")[1])
+            await query.edit_message_text("✅ تم تحديث فلتر آخر ظهور.", reply_markup=self.kb.settings_menu())
+            return 11
+        return 15
+
+    # ----- Controls -----
+    @owner_only
+    async def transfer_control(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+        
+        # Real logic interacts with transfer_manager to pause/resume based on ID.
+        # Since ID is in context or embedded in callback_data:
+        tid = data.split("_")[-1] if "_" in data else context.user_data.get('direct_transfer_id')
+        if tid and tid in self.transfer_manager.active_transfers:
+            if "pause" in data:
+                self.transfer_manager.active_transfers[tid]['status'] = 'paused'
+            elif "resume" in data:
+                self.transfer_manager.active_transfers[tid]['status'] = 'running'
+            elif "cancel" in data:
+                self.transfer_manager.active_transfers[tid]['status'] = 'cancelled'
+                await query.edit_message_text("🚫 تم إلغاء عملية النقل.")
+                return await self.start(update, context)
+        return 5
+
+    @owner_only
     async def cancel_operation(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """إلغاء العملية الحالية"""
-        await update.message.reply_text("تم إلغاء العملية.")
-        return ConversationHandler.END
+        msg = "🚫 تم إلغاء العملية."
+        if update.callback_query:
+            await update.callback_query.edit_message_text(msg)
+        else:
+            await update.message.reply_text(msg)
+        return await self.start(update, context)

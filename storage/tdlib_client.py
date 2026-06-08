@@ -137,7 +137,11 @@ class StorageTDLibClient:
 
         params = {
             '@type': 'setTdlibParameters',
+            'use_test_dc': False,
             'database_directory': self.db_directory,
+            'files_directory': self.db_directory + '/files',
+            'use_file_database': False,
+            'use_chat_info_database': False,
             'use_message_database': True,
             'use_secret_chats': False,
             'api_id': self.api_id,
@@ -146,7 +150,8 @@ class StorageTDLibClient:
             'device_model': self.device_info.get('device_model', 'SM-G998B'),
             'system_version': self.device_info.get('system_version', 'Android 12'),
             'application_version': self.device_info.get('app_version', '8.5.1'),
-            'enable_storage_optimizer': True
+            'enable_storage_optimizer': True,
+            'ignore_file_names': True
         }
         self.send(params)
         self.send({'@type': 'checkDatabaseEncryptionKey', 'encryption_key': ''})
