@@ -10,6 +10,7 @@ logger = logging.getLogger("Database")
 
 
 
+
 async def get_db_pool():
     """Returns a new connection pool for the current event loop, with robust SSL fallback."""
     dsn = os.getenv('DATABASE_URL', '')
@@ -19,24 +20,13 @@ async def get_db_pool():
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
 
-    try:
-        pool = await asyncpg.create_pool(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME,
-            ssl=ssl_context,
-            min_size=1,
-            max_size=5,
-            command_timeout=30
-        )
-        async with pool.acquire() as conn:
-            await conn.execute("SELECT 1")
-        logger.info("Database pool created successfully with ssl_context via explicit kwargs")
-        return pool
-    except Exception as e:
-        logger.warning(f"Failed DB connection via explicit kwargs + SSLContext: {e}")
+    # We will attempt 3 modes:
+    # 1. Custom SSL context (for external connections with self-signed certs)
+    # 2. 'require' (for standard external secure connections)
+    # 3. False (for internal Render connections which drop connections if SSL is attempted)
+    ssl_modes = [ssl_context, 'require', False]
+
+    for mode in ssl_modes:
         try:
             pool = await asyncpg.create_pool(
                 host=DB_HOST,
@@ -44,15 +34,17 @@ async def get_db_pool():
                 user=DB_USER,
                 password=DB_PASSWORD,
                 database=DB_NAME,
-                ssl='require',
+                ssl=mode,
                 min_size=1,
                 max_size=5,
                 command_timeout=30
             )
             async with pool.acquire() as conn:
                 await conn.execute("SELECT 1")
-            logger.info("Database pool created successfully with ssl='require' via explicit kwargs")
+            logger.info(f"Database pool created successfully with ssl={mode}")
             return pool
-        except Exception as e2:
-            logger.error(f"Failed DB connection via explicit kwargs + require: {e2}")
-            raise Exception(f"All DB connection attempts failed. Last error: {e2}")
+        except Exception as e:
+            logger.warning(f"Failed DB connection with ssl={mode}: {e}")
+            await asyncio.sleep(0.5)
+
+    raise Exception("All DB connection attempts failed.")
