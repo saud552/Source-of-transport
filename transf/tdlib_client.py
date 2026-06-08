@@ -112,17 +112,21 @@ class TDLibClient:
             self._dispatcher_task = asyncio.create_task(self._dispatcher_loop())
 
         params = {
-            'parameters': {
-                '@type': 'tdlibParameters',
-                'database_directory': self.db_directory,
-                'use_message_database': True,
-                'api_id': API_ID,
-                'api_hash': API_HASH,
-                'system_language_code': 'en',
-                'device_model': self.device_info.get('device_model', 'SM-G998B'),
-                'system_version': self.device_info.get('system_version', 'Android 12'),
-                'application_version': self.device_info.get('app_version', '1.0.0'),
-            }
+            'use_test_dc': False,
+            'database_directory': self.db_directory,
+            'files_directory': self.db_directory + '/files',
+            'use_file_database': False,
+            'use_chat_info_database': False,
+            'use_message_database': True,
+            'use_secret_chats': False,
+            'api_id': API_ID,
+            'api_hash': API_HASH,
+            'system_language_code': 'en',
+            'device_model': self.device_info.get('device_model', 'SM-G998B'),
+            'system_version': self.device_info.get('system_version', 'Android 12'),
+            'application_version': self.device_info.get('app_version', '1.0.0'),
+            'enable_storage_optimizer': True,
+            'ignore_file_names': True
         }
         await self.call_method('setTdlibParameters', params)
         await self.call_method('checkDatabaseEncryptionKey', {'encryption_key': ''})
@@ -130,6 +134,25 @@ class TDLibClient:
         self.is_initialized = True
         logger.info(f"[{self.phone}] TDLib client initialized successfully.")
         return True
+
+
+    async def get_chat_id_by_username(self, username: str) -> Optional[int]:
+        res = await self.call_method('searchPublicChat', {'username': username})
+        if res.get('@type') == 'chat':
+            return res.get('id')
+        return None
+
+    async def get_supergroup_full_info(self, supergroup_id: int) -> Dict[str, Any]:
+        return await self.call_method('getSupergroupFullInfo', {'supergroup_id': supergroup_id})
+
+    async def get_supergroup_members(self, supergroup_id: int, filter_type: str, offset: int, limit: int) -> Dict[str, Any]:
+        params = {
+            'supergroup_id': supergroup_id,
+            'filter': {'@type': filter_type},
+            'offset': offset,
+            'limit': limit
+        }
+        return await self.call_method('getSupergroupMembers', params)
 
     async def add_chat_member(self, chat_id: int, user_id: int) -> Dict[str, Any]:
         logger.info(f"[{self.phone}] Attempting to add user {user_id} to chat {chat_id}")

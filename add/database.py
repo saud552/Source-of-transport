@@ -55,3 +55,14 @@ class DatabaseManager:
 
     async def close(self):
         if self.pool: await self.pool.close()
+
+    async def get_all_categories_with_counts(self):
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT c.id, c.name, COUNT(a.id) as account_count
+                FROM categories c
+                LEFT JOIN accounts a ON c.id = a.category_id AND a.session_str IS NOT NULL
+                GROUP BY c.id, c.name
+                ORDER BY c.created_at DESC
+            ''')
+            return [dict(r) for r in rows]

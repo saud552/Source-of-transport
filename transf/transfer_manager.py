@@ -1,3 +1,4 @@
+import uuid
 # -*- coding: utf-8 -*-
 """
 مدير عمليات النقل (Jitter & Enhanced Logging Version)
@@ -71,68 +72,174 @@ class TransferManager:
         """توليد تأخير عشوائي لمحاكاة النشاط البشري"""
         return random.uniform(MIN_JITTER_DELAY, MAX_JITTER_DELAY)
 
-    async def start_transfer(self, transfer_id: str, members: List[Dict[str, Any]], 
-                             accounts: List[Dict[str, Any]], update, context) -> None:
+
+    async def start_direct_transfer(self, target_group_id: int, source_links: List[str],
+                                    accounts: List[Dict[str, Any]], update, context) -> None:
         client_pool = ClientPool(accounts)
         await client_pool.initialize_all()
 
+        transfer_id = str(uuid.uuid4())
+        self.active_transfers[transfer_id] = {
+            'status': 'extracting',
+            'transferred_count': 0,
+            'failed_count': 0,
+            'privacy_count': 0,
+            'members': [],
+            'start_time': datetime.now()
+        }
+
+        await self.db_manager.create_transfer_operation(
+            source_group_id=0, source_group_title="Direct Links",
+            target_group_id=target_group_id, target_group_title=str(target_group_id),
+            account_category=accounts[0].get('category_id') if accounts else None
+        )
+
+        msg = await update.callback_query.message.reply_text("🚀 **بدء الاستخراج المباشر...**\nجاري سحب الأعضاء...", parse_mode="Markdown")
+        context.user_data['direct_transfer_id'] = transfer_id
+        context.user_data['transfer_msg_id'] = msg.message_id
+
+        asyncio.create_task(self._direct_transfer_engine(transfer_id, target_group_id, source_links, client_pool, update, context))
+
+    async def _direct_transfer_engine(self, transfer_id, target_group_id, source_links, client_pool, update, context):
+        task = self.active_transfers[transfer_id]
+
+        # 1. Extraction Phase
+        members_buffer = []
+        for link in source_links:
+            if task['status'] == 'cancelled': break
+
+            client = client_pool.get_next_available()
+            if not client: continue
+
+            # Resolve group link
+            username = link.split("/")[-1].replace("@", "")
+            source_id = await client.get_chat_id_by_username(username)
+            if not source_id: continue
+
+            # If Supergroup, extract
+            if str(source_id).startswith("-100"):
+                supergroup_id = int(str(source_id)[4:])
+
+                try:
+                    info_res = await client.get_supergroup_full_info(supergroup_id)
+                    if info_res.get('@type') == 'supergroupFullInfo':
+                        member_count = info_res.get('member_count', 1000)
+                        limit = min(200, member_count) # Direct transfer sample size limit to avoid long wait
+
+                        m_res = await client.get_supergroup_members(supergroup_id, 'supergroupMembersFilterRecent', 0, limit)
+
+                        if m_res.get('@type') == 'chatMembers':
+                            for m in m_res.get('members', []):
+                                mid = m.get('member_id', {}).get('user_id')
+                                if mid: members_buffer.append({'user_id': mid})
+                except Exception as e:
+                    logger.error(f"Extraction error: {e}")
+
+        task['members'] = members_buffer
+        if task['status'] == 'cancelled':
+            await client_pool.close_all()
+            return
+
+        task['status'] = 'running'
+
+        # 2. Add Phase (reusing start_transfer logic internally but we already have pool)
+        await self._transfer_execution_loop(transfer_id, members_buffer, target_group_id, client_pool, update, context)
+
+    async def _transfer_execution_loop(self, transfer_id, members, target_group_id, client_pool, update, context):
+        task = self.active_transfers[transfer_id]
+
+        # Resolve target group ID if it's a string username
+        if isinstance(target_group_id, str):
+            resolve_client = client_pool.get_next_available()
+            if resolve_client:
+                resolved_id = await resolve_client.get_chat_id_by_username(target_group_id)
+                if resolved_id: target_group_id = resolved_id
+
         try:
-            self.active_transfers[transfer_id] = {
-                'status': 'running',
-                'transferred_count': 0,
-                'failed_count': 0,
-                'privacy_count': 0,
-                'members': members,
-                'start_time': datetime.now()
-            }
+            # Settings
+            min_delay = int(await self.db_manager.get_setting('delay_min') or 2)
+            max_delay = int(await self.db_manager.get_setting('delay_max') or 5)
+            batch_size = int(await self.db_manager.get_setting('batch_size') or 10)
             
-            logger.info(f"Starting Transfer ID: {transfer_id} for {len(members)} members.")
+            adds_this_account = 0
+            current_client = client_pool.get_next_available()
 
             for i, member in enumerate(members):
-                if transfer_id not in self.active_transfers or self.active_transfers[transfer_id]['status'] == 'cancelled':
-                    logger.info(f"Transfer {transfer_id} was cancelled.")
-                    break
+                if task['status'] == 'cancelled': break
+                while task['status'] == 'paused': await asyncio.sleep(1)
                 
-                if self.active_transfers[transfer_id]['status'] == 'paused':
-                    logger.info(f"Transfer {transfer_id} is paused.")
-                    while self.active_transfers[transfer_id]['status'] == 'paused':
-                        await asyncio.sleep(1)
+                if adds_this_account >= batch_size:
+                    current_client = client_pool.get_next_available()
+                    adds_this_account = 0
 
-                client = client_pool.get_next_available()
-                if not client:
-                    logger.warning(f"All accounts in pool are flood-waited. Waiting {BATCH_ROTATE_DELAY}s")
-                    await asyncio.sleep(BATCH_ROTATE_DELAY)
-                    continue
+                if not current_client:
+                    await asyncio.sleep(30)
+                    current_client = client_pool.get_next_available()
+                    if not current_client: continue
 
-                # Add member
-                status = await self._process_member_addition(client, member, transfer_id)
+                res = await current_client.add_chat_member(target_group_id, member['user_id'])
                 
-                if status == 'success':
-                    self.active_transfers[transfer_id]['transferred_count'] += 1
-                elif status == 'privacy_restricted':
-                    self.active_transfers[transfer_id]['privacy_count'] += 1
+                if res.get('@type') == 'ok':
+                    task['transferred_count'] += 1
+                    # Update status in db if we have group_db_id (stored transfer), for direct we skip
+                    if 'group_db_id' in task:
+                        await self.db_manager.update_stored_member_transfer_status(member['user_id'], task['group_db_id'], 'success')
                 else:
-                    self.active_transfers[transfer_id]['failed_count'] += 1
+                    err = res.get('message', '')
+                    if 'PRIVACY' in err:
+                        task['privacy_count'] += 1
+                        status = 'privacy'
+                    else:
+                        task['failed_count'] += 1
+                        status = 'failed'
 
-                # Progress Update
+                    if 'group_db_id' in task:
+                        await self.db_manager.update_stored_member_transfer_status(member['user_id'], task['group_db_id'], status)
+
+                adds_this_account += 1
+
                 if (i + 1) % 5 == 0 or (i + 1) == len(members):
                     progress = ((i + 1) / len(members)) * 100
                     await self._update_progress(transfer_id, progress, update, context)
                 
-                # Human behavior jitter
-                delay = self.get_jitter()
-                logger.debug(f"Applying jitter delay: {delay:.2f}s")
+                delay = random.uniform(min_delay, max_delay)
                 await asyncio.sleep(delay)
-            
+
             await self._complete_transfer(transfer_id, update, context)
-            
         except Exception as e:
-            logger.exception(f"Critical failure in transfer {transfer_id}: {e}")
-            await self._handle_transfer_error(transfer_id, str(e), update, context)
+            logger.error(f"Transfer loop error: {e}")
         finally:
             await client_pool.close_all()
             if transfer_id in self.active_transfers:
                 del self.active_transfers[transfer_id]
+
+    async def start_stored_transfer(self, transfer_id: str, group_db_id: str, target_group_id: int,
+                                  members: List[Dict[str, Any]], accounts: List[Dict[str, Any]],
+                                  update, context) -> None:
+        client_pool = ClientPool(accounts)
+        await client_pool.initialize_all()
+
+        self.active_transfers[transfer_id] = {
+            'status': 'running',
+            'transferred_count': 0,
+            'failed_count': 0,
+            'privacy_count': 0,
+            'members': members,
+            'start_time': datetime.now(),
+            'group_db_id': group_db_id
+        }
+
+        await self.db_manager.create_transfer_operation(
+            source_group_id=0, source_group_title="Stored Group",
+            target_group_id=target_group_id, target_group_title=str(target_group_id),
+            account_category=accounts[0].get('category_id') if accounts else None
+        )
+
+        msg = await update.callback_query.message.reply_text("🚀 **بدء نقل الأعضاء المخزنين...**", parse_mode="Markdown")
+        context.user_data['transfer_msg_id'] = msg.message_id
+
+        asyncio.create_task(self._transfer_execution_loop(transfer_id, members, target_group_id, client_pool, update, context))
+
 
     async def _process_member_addition(self, client: TDLibClient, member: Dict[str, Any],
                                      transfer_id: str) -> str:

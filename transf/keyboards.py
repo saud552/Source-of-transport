@@ -12,9 +12,9 @@ class TransferKeyboards:
     def main_menu(self) -> InlineKeyboardMarkup:
         """القائمة الرئيسية"""
         keyboard = [
-            [InlineKeyboardButton("📤 بدء نقل الأعضاء", callback_data="start_transfer")],
-            [InlineKeyboardButton("📊 تاريخ النقل", callback_data="view_history")],
-            [InlineKeyboardButton("📋 المجموعات المتاحة", callback_data="view_groups")],
+            [InlineKeyboardButton("📤 نقل مباشر", callback_data="transfer_direct")],
+            [InlineKeyboardButton("📂 عرض المجموعات المخزنة", callback_data="transfer_view_storage")],
+            [InlineKeyboardButton("⚙️ الإعدادات", callback_data="transfer_settings")],
             [InlineKeyboardButton("❌ إلغاء", callback_data="cancel")]
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -122,4 +122,32 @@ class TransferKeyboards:
             keyboard.append(nav_buttons)
         
         keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
+        return InlineKeyboardMarkup(keyboard)
+    def settings_menu(self) -> InlineKeyboardMarkup:
+        keyboard = [
+            [InlineKeyboardButton("⏱️ الفاصل الزمني العشوائي", callback_data="set_delay")],
+            [InlineKeyboardButton("🔄 عدد الإضافات قبل التبديل", callback_data="set_batch_size")],
+            [InlineKeyboardButton("⏳ فلترة آخر ظهور", callback_data="set_ls_filter")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_main")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    def last_seen_settings_keyboard(self) -> InlineKeyboardMarkup:
+        keyboard = [
+            [InlineKeyboardButton("🟢 آخر ظهور منذ زمن قريب", callback_data="tls_recently")],
+            [InlineKeyboardButton("🟡 آخر ظهور منذ أسبوع أو أكثر", callback_data="tls_week")],
+            [InlineKeyboardButton("🟠 آخر ظهور منذ شهر أو أكثر", callback_data="tls_month")],
+            [InlineKeyboardButton("🔴 آخر ظهور منذ زمن طويل", callback_data="tls_empty")],
+            [InlineKeyboardButton("♾️ جميع الخيارات", callback_data="tls_all")],
+            [InlineKeyboardButton("🔙 رجوع للإعدادات", callback_data="transfer_settings")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    def stored_group_action_keyboard(self, group_id: str, category_id: str) -> InlineKeyboardMarkup:
+        keyboard = [
+            [InlineKeyboardButton("🔄 نقل من جديد", callback_data=f"t_new_{group_id}")],
+            [InlineKeyboardButton("▶️ استكمال النقل", callback_data=f"t_resume_{group_id}")],
+            [InlineKeyboardButton("🔁 نقل الذين تم نقلهم مسبقاً", callback_data=f"t_retry_{group_id}")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data=f"t_back_{category_id}")]
+        ]
         return InlineKeyboardMarkup(keyboard)
